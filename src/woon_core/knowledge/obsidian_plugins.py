@@ -16,46 +16,24 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from woon_core.calendar.constants import (
-    LINK_CALENDAR_DASHBOARD_CSS_CLASS,
-    LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS,
-    LINK_CALENDAR_PLUGIN_ID,
-    LINK_CALENDAR_PROFILE_ID,
-    LINK_CALENDAR_VERSION,
-)
-from woon_core.calendar.projection import (
-    APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH,
-    APPLE_CALENDAR_EVENTS_RELATIVE_PATH,
-    APPLE_CALENDAR_ICS_RELATIVE_PATH,
-    APPLE_CALENDAR_NOTION_DATABASE_RELATIVE_PATH,
-    PRISMA_EMPTY_VIRTUAL_EVENTS,
-    PRISMA_VIRTUAL_EVENTS_FILENAME,
-    is_core_calendar_dashboard,
-    is_core_calendar_notion_database,
-)
 from woon_core.errors import WoonError
 from woon_core.io import exclusive_file_lock
 
+LINK_CALENDAR_ID = "link-calendar"
+LINK_CALENDAR_VERSION = "3.3.0"
+LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS = (
+    "daily-agenda",
+    "direct-note-link",
+    "event-marker",
+    "month-view",
+    "readonly-blocked",
+    "ribbon",
+)
+
 REQUIRED_ASSETS = ("main.js", "manifest.json", "styles.css")
 PRISMA_CALENDAR_ID = "prisma-calendar"
-PRISMA_CALENDAR_EVENTS_DIRECTORY = "inbox/calendar/events"
-PRISMA_VIRTUAL_EVENTS_STEM = PRISMA_VIRTUAL_EVENTS_FILENAME.removesuffix(".md")
-PRISMA_READONLY_TOOLBAR = ("prevNext", "today", "now", "zoomLevel", "searchInput")
-PRISMA_READONLY_CONTEXT_MENU = ("preview", "goToSource", "openFile")
 FULL_CALENDAR_REMASTERED_ID = "full-calendar-remastered"
-FULL_CALENDAR_SOURCE_COLOR = "#687B86"
 NOTION_BASES_ID = "notion-bases"
-LINK_CALENDAR_ID = LINK_CALENDAR_PLUGIN_ID
-LINK_CALENDAR_SOURCE = APPLE_CALENDAR_EVENTS_RELATIVE_PATH
-LINK_CALENDAR_PROPERTY_FIELDS = (
-    ("title", "title"),
-    ("start", "Date"),
-    ("end", "End Date"),
-    ("startTime", "Start Date"),
-    ("endTime", "End Date"),
-    ("allDay", "All Day"),
-    ("category", "Category"),
-)
 LEGACY_SIMPLE_CALENDAR_ID = "woon-simple-calendar"
 LEGACY_CONTEXT_CALENDAR_ID = "context-calendar"
 LINKED_GRAPH_ID = "linked-graph"
@@ -63,14 +41,24 @@ LEGACY_CONTEXT_GRAPH_ID = "context-graph"
 LINKED_GRAPH_VERSION = "1.6.0"
 RUNNABLE_CODE_BLOCKS_ID = "runnable-code-blocks"
 RUNNABLE_CODE_BLOCKS_VERSION = "0.2.4"
-LOCAL_DEVELOPMENT_PLUGINS = frozenset({LINK_CALENDAR_ID, LINKED_GRAPH_ID, RUNNABLE_CODE_BLOCKS_ID})
-LINK_CALENDAR_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/link-calendar.git"
-LINKED_GRAPH_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/linked-graph.git"
-RUNNABLE_CODE_BLOCKS_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/runnable-code-blocks.git"
+LOCAL_DEVELOPMENT_PLUGINS = frozenset(
+    {
+        LINK_CALENDAR_ID,
+        LINKED_GRAPH_ID,
+        RUNNABLE_CODE_BLOCKS_ID,
+        "woon-knowledge",
+        "manta-diagrams",
+    }
+)
+LINK_CALENDAR_SOURCE_REPOSITORY = "https://github.com/woonyong-choi/manta-calendar.git"
+LINKED_GRAPH_SOURCE_REPOSITORY = "https://github.com/woonyong-choi/manta-graph.git"
+RUNNABLE_CODE_BLOCKS_SOURCE_REPOSITORY = "https://github.com/woonyong-choi/manta-code-blocks.git"
 LOCAL_PLUGIN_SOURCE_REPOSITORIES = {
     LINK_CALENDAR_ID: LINK_CALENDAR_SOURCE_REPOSITORY,
     LINKED_GRAPH_ID: LINKED_GRAPH_SOURCE_REPOSITORY,
     RUNNABLE_CODE_BLOCKS_ID: RUNNABLE_CODE_BLOCKS_SOURCE_REPOSITORY,
+    "woon-knowledge": "https://github.com/woonyong-choi/manta.git",
+    "manta-diagrams": "https://github.com/woonyong-choi/manta-diagrams.git",
 }
 
 
@@ -88,14 +76,14 @@ class GitSourceProvenance:
 
 OFFICIAL_PLUGINS = {
     LINK_CALENDAR_ID: OfficialPlugin(
-        plugin_id=LINK_CALENDAR_ID, repository="woonyong-kr/link-calendar"
+        plugin_id=LINK_CALENDAR_ID, repository="woonyong-choi/manta-calendar"
     ),
     LINKED_GRAPH_ID: OfficialPlugin(
-        plugin_id=LINKED_GRAPH_ID, repository="woonyong-kr/linked-graph"
+        plugin_id=LINKED_GRAPH_ID, repository="woonyong-choi/manta-graph"
     ),
     RUNNABLE_CODE_BLOCKS_ID: OfficialPlugin(
         plugin_id=RUNNABLE_CODE_BLOCKS_ID,
-        repository="woonyong-kr/runnable-code-blocks",
+        repository="woonyong-choi/manta-code-blocks",
     ),
     "light-mindmap": OfficialPlugin(plugin_id="light-mindmap", repository="ninglg/light-mindmap"),
     "markdown-mindmap": OfficialPlugin(
@@ -679,249 +667,404 @@ class ObsidianPluginService:
         )
         return receipt
 
-    def configure_prisma_calendar(self) -> dict[str, Any]:
-        """Serialize the legacy Prisma configuration migration."""
+    def retire_apple_calendar_source(
+        self, *, apply: bool = False, expected_settings_sha256: str | None = None
+    ) -> dict[str, Any]:
+        """Remove only the retired Apple profile and its Google source selection.
 
-        return self._mutate(self._configure_prisma_calendar_locked)
-
-    def _configure_prisma_calendar_locked(self) -> dict[str, Any]:
-        """Point Prisma at the Core-owned, read-only Apple Calendar projection."""
-
-        self._require_vault()
-        manifest = self._installed_manifest(PRISMA_CALENDAR_ID)
-        receipt_id = self._receipt_id()
-        backup_root = self._local / "backups" / receipt_id
-        settings_path = self._plugins / PRISMA_CALENDAR_ID / "data.json"
-        if settings_path.exists():
-            backup_root.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(settings_path, backup_root / "data.json")
-        self._prepare_prisma_virtual_events_store(backup_root)
-        configuration = _prisma_calendar_configuration(manifest["version"])
-        _atomic_write(
-            settings_path,
-            (json.dumps(configuration, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
-        )
-        loaded = json.loads(settings_path.read_text(encoding="utf-8"))
-        calendars = loaded.get("calendars") if isinstance(loaded, dict) else None
-        calendar = calendars[0] if isinstance(calendars, list) and len(calendars) == 1 else None
-        if (
-            not isinstance(calendar, dict)
-            or calendar.get("directory") != PRISMA_CALENDAR_EVENTS_DIRECTORY
-            or calendar.get("startProp") != "Start Date"
-            or calendar.get("endProp") != "End Date"
-            or calendar.get("dateProp") != "Date"
-            or calendar.get("allDayProp") != "All Day"
-            or calendar.get("titleProp") != "title"
-            or calendar.get("defaultView") != "dayGridMonth"
-            or calendar.get("defaultMobileView") != "dayGridMonth"
-            or calendar.get("toolbarButtons") != list(PRISMA_READONLY_TOOLBAR)
-            or calendar.get("mobileToolbarButtons") != list(PRISMA_READONLY_TOOLBAR)
-            or calendar.get("contextMenuItems") != list(PRISMA_READONLY_CONTEXT_MENU)
-            or calendar.get("batchActionButtons") != []
-            or calendar.get("virtualEventsFileName") != PRISMA_VIRTUAL_EVENTS_STEM
-        ):
-            raise WoonError("Prisma Calendar configuration could not be verified")
-        receipt = {
-            "receipt_id": receipt_id,
-            "action": "configure-prisma-calendar",
-            "created_at": datetime.now(UTC).isoformat(),
-            "plugin": {
-                "id": PRISMA_CALENDAR_ID,
-                "version": manifest["version"],
-            },
-            "calendar": calendar,
-            "external_sync": "disabled",
-            "projection_write": "core-only",
-            "virtual_events_store": "hidden-empty-readonly",
-        }
-        _atomic_write(
-            self._local / "receipts" / f"{receipt_id}.json",
-            (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
-        )
-        return receipt
-
-    def configure_full_calendar_remastered(self) -> dict[str, Any]:
-        """Serialize the legacy Full Calendar configuration migration."""
-
-        return self._mutate(self._configure_full_calendar_remastered_locked)
-
-    def _configure_full_calendar_remastered_locked(self) -> dict[str, Any]:
-        """Configure FCR as a month-only, renderer-only view of the Core ICS output."""
-
-        self._require_vault()
-        manifest = self._installed_manifest(FULL_CALENDAR_REMASTERED_ID)
-        if FULL_CALENDAR_REMASTERED_ID not in self._enabled_ids():
-            raise WoonError("Full Calendar Remastered must be enabled before configuration")
-        receipt_id = self._receipt_id()
-        backup_root = self._local / "backups" / receipt_id
-        settings_path = self._plugins / FULL_CALENDAR_REMASTERED_ID / "data.json"
-        if settings_path.exists():
-            backup_root.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(settings_path, backup_root / "data.json")
-        retired_prisma_support = self._retire_prisma_virtual_events_store(backup_root)
-        configuration = _full_calendar_configuration(manifest["version"])
-        _atomic_write(
-            settings_path,
-            (json.dumps(configuration, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
-        )
-        loaded = json.loads(settings_path.read_text(encoding="utf-8"))
-        _validate_full_calendar_configuration(loaded, manifest["version"])
-        receipt = {
-            "receipt_id": receipt_id,
-            "action": "configure-full-calendar-remastered",
-            "created_at": datetime.now(UTC).isoformat(),
-            "plugin": {
-                "id": FULL_CALENDAR_REMASTERED_ID,
-                "version": manifest["version"],
-            },
-            "calendar_source": configuration["calendarSources"][0],
-            "initial_view": configuration["initialView"],
-            "external_sync": "disabled",
-            "projection_write": "core-only",
-            "retired_prisma_support_files": retired_prisma_support,
-        }
-        _atomic_write(
-            self._local / "receipts" / f"{receipt_id}.json",
-            (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
-        )
-        return receipt
-
-    def configure_notion_bases_calendar(self) -> dict[str, Any]:
-        """Serialize verification and receipt creation for the Notion Bases view."""
-
-        return self._mutate(self._configure_notion_bases_calendar_locked)
-
-    def _configure_notion_bases_calendar_locked(self) -> dict[str, Any]:
-        """Verify the Core-owned Markdown month view consumed by Notion Bases.
-
-        Notion Bases keeps its schema and view metadata in Markdown, so there is no
-        plugin-local settings file to create.  The generated database and dashboard are
-        the complete, read-only configuration contract.
+        Preview is read-only. Application requires that preview's settings hash;
+        account credentials, remote record mappings and source documents are preserved.
         """
 
-        self._require_vault()
-        manifest = self._installed_manifest(NOTION_BASES_ID)
-        if NOTION_BASES_ID not in self._enabled_ids():
-            raise WoonError("Notion Bases must be enabled before configuration")
-        self._require_notion_bases_calendar_projection()
-        receipt_id = self._receipt_id()
-        receipt = {
-            "receipt_id": receipt_id,
-            "action": "configure-notion-bases-calendar",
-            "created_at": datetime.now(UTC).isoformat(),
-            "plugin": {"id": NOTION_BASES_ID, "version": manifest["version"]},
-            "database": {
-                "path": APPLE_CALENDAR_NOTION_DATABASE_RELATIVE_PATH,
-                "date_field": "Date",
-                "view": "calendar",
-                "view_mode": "month",
-                "card_fields": "title-only",
-            },
-            "dashboard": APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH,
-            "external_sync": "disabled",
-            "projection_write": "core-only",
-        }
-        _atomic_write(
-            self._local / "receipts" / f"{receipt_id}.json",
-            (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
-        )
-        return receipt
-
-    def configure_link_calendar(self) -> dict[str, Any]:
-        """Serialize Link Calendar settings changes for this Vault."""
-
-        return self._mutate(self._configure_link_calendar_locked)
-
-    def _configure_link_calendar_locked(self) -> dict[str, Any]:
-        """Upsert Woon's read-only source profile into an installed local build.
-
-        The plugin remains independently configurable: unrelated settings and source
-        profiles are retained.  A failed write, semantic verification, or receipt write
-        restores the exact previous ``data.json`` state.
-        """
-
-        self._require_vault()
-        self._require_link_calendar_projection()
-        manifest = self._installed_manifest(LINK_CALENDAR_ID)
-        if manifest["version"] != LINK_CALENDAR_VERSION:
-            raise WoonError(
-                "Link Calendar version must match the approved local development version"
+        def operation() -> dict[str, Any]:
+            return self._retire_apple_calendar_source_locked(
+                apply=apply, expected_settings_sha256=expected_settings_sha256
             )
-        if LINK_CALENDAR_ID not in self._enabled_ids():
-            raise WoonError("Link Calendar must be enabled before configuration")
-        self._require_verified_local_build(LINK_CALENDAR_ID, LINK_CALENDAR_VERSION)
 
-        receipt_id = self._receipt_id()
-        backup_root = self._local / "backups" / receipt_id
+        return self._mutate(operation) if apply else operation()
+
+    def _retire_apple_calendar_source_locked(
+        self, *, apply: bool, expected_settings_sha256: str | None
+    ) -> dict[str, Any]:
+        self._require_vault()
         settings_path = self._plugins / LINK_CALENDAR_ID / "data.json"
-        settings_before = settings_path.read_bytes() if settings_path.is_file() else None
-        legacy_settings_path = self._plugins / LEGACY_CONTEXT_CALENDAR_ID / "data.json"
-        legacy_settings_before: bytes | None = None
-        if settings_before is not None:
-            existing = self._read_json_object(settings_path)
-        elif legacy_settings_path.exists():
-            _require_vault_local_file(
-                self._vault, legacy_settings_path, "legacy Context Calendar settings"
-            )
-            legacy_settings_before = legacy_settings_path.read_bytes()
-            existing = self._read_json_object(legacy_settings_path)
-        else:
-            existing = {}
-        configuration = _link_calendar_configuration(existing)
-        content = (json.dumps(configuration, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-        backup_path = backup_root / LINK_CALENDAR_ID / "data.json"
-        if settings_before is not None:
-            _atomic_write(backup_path, settings_before)
-        _require_unchanged_file(settings_path, settings_before, "Link Calendar settings")
+        _require_vault_local_file(self._vault, settings_path, "Link Calendar settings")
+        manifest = self._installed_manifest(LINK_CALENDAR_ID)
+        before = settings_path.read_bytes()
+        before_hash = _sha256(before)
+        if apply and expected_settings_sha256 != before_hash:
+            raise WoonError("Link Calendar settings changed or preview hash is missing; replan")
+        configuration = json.loads(before)
+        if not isinstance(configuration, dict):
+            raise WoonError("Link Calendar settings must be an object")
+        profiles = configuration.get("sourceProfiles", [])
+        if not isinstance(profiles, list) or not all(
+            isinstance(profile, dict) and isinstance(profile.get("id"), str) for profile in profiles
+        ):
+            raise WoonError("Link Calendar sourceProfiles must have explicit profile IDs")
+        retired_id = "woon-apple-calendar"
+        removed = sum(profile["id"] == retired_id for profile in profiles)
+        if removed:
+            configuration["sourceProfiles"] = [p for p in profiles if p["id"] != retired_id]
+        google = configuration.get("googleCalendar", {})
+        if not isinstance(google, dict):
+            raise WoonError("Link Calendar googleCalendar must be an object")
+        selections = google.get("sourceProfileIds", [])
+        if not isinstance(selections, list) or not all(isinstance(p, str) for p in selections):
+            raise WoonError("Google Calendar sourceProfileIds must be a list of strings")
+        removed_selections = selections.count(retired_id)
+        if removed_selections:
+            google["sourceProfileIds"] = [p for p in selections if p != retired_id]
+        changed = bool(removed or removed_selections)
+        receipt = {
+            "action": "retire-apple-calendar-source",
+            "applied": apply,
+            "changed": changed,
+            "plugin": {"id": LINK_CALENDAR_ID, "version": manifest["version"]},
+            "source_profile_id": retired_id,
+            "removed_profiles": removed,
+            "removed_google_selections": removed_selections,
+            "before_sha256": before_hash,
+            "preserved": ["other-profiles", "google-account-and-records", "source-documents"],
+            "remote_writes": 0,
+            "ui_verified": False,
+        }
+        if not apply or not changed:
+            return receipt
+        return self._write_link_calendar_settings(configuration, before, receipt)
 
-        receipt_path = self._local / "receipts" / f"{receipt_id}.json"
-        try:
-            _atomic_write(settings_path, content)
-            loaded = self._read_json_object(settings_path)
-            profile = _validate_link_calendar_configuration(loaded)
-            receipt = {
-                "receipt_id": receipt_id,
-                "action": "configure-link-calendar",
-                "created_at": datetime.now(UTC).isoformat(),
-                "plugin": {
-                    "id": LINK_CALENDAR_ID,
-                    "version": manifest["version"],
-                },
-                "settings": {
-                    "path": settings_path.relative_to(self._vault).as_posix(),
-                    "sha256": _sha256(content),
-                    "backup": (
-                        backup_path.relative_to(self._vault).as_posix()
-                        if settings_before is not None
-                        else None
-                    ),
-                    "migrated_from": (
-                        {
-                            "path": legacy_settings_path.relative_to(self._vault).as_posix(),
-                            "sha256": _sha256(legacy_settings_before),
-                        }
-                        if legacy_settings_before is not None
-                        else None
-                    ),
-                },
-                "source_profile": profile,
-                "dashboard": APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH,
-                "external_sync": "disabled",
-                "projection_write": "core-only",
-            }
-            _atomic_write(
-                receipt_path,
-                (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+    def configure_google_two_way_source(
+        self, *, apply: bool = False, expected_settings_sha256: str | None = None
+    ) -> dict[str, Any]:
+        """Configure the approved incoming folder without synchronizing any events."""
+
+        def operation() -> dict[str, Any]:
+            return self._configure_google_two_way_source_locked(
+                apply=apply, expected_settings_sha256=expected_settings_sha256
             )
+
+        return self._mutate(operation) if apply else operation()
+
+    def _configure_google_two_way_source_locked(
+        self, *, apply: bool, expected_settings_sha256: str | None
+    ) -> dict[str, Any]:
+        self._require_vault()
+        settings_path = self._plugins / LINK_CALENDAR_ID / "data.json"
+        _require_vault_local_file(self._vault, settings_path, "Link Calendar settings")
+        manifest = self._installed_manifest(LINK_CALENDAR_ID)
+        before = settings_path.read_bytes()
+        before_hash = _sha256(before)
+        if apply and expected_settings_sha256 != before_hash:
+            raise WoonError("Link Calendar settings changed or preview hash is missing; replan")
+        configuration = json.loads(before)
+        if not isinstance(configuration, dict):
+            raise WoonError("Link Calendar settings must be an object")
+        # The plugin accepts both spellings; do not shadow an existing legacy collection.
+        collection = "sourceProfiles" if "sourceProfiles" in configuration else "profiles"
+        profiles = configuration.get(collection, [])
+        if not isinstance(profiles, list) or not all(
+            isinstance(profile, dict) and isinstance(profile.get("id"), str) for profile in profiles
+        ):
+            raise WoonError("Link Calendar source profiles must have explicit profile IDs")
+        if collection == "profiles" and "profiles" not in configuration:
+            collection = "sourceProfiles"
+        profile_id = "woon-google-calendar"
+        folder = "inbox/calendar/google"
+        target = self._vault
+        for part in Path(folder).parts:
+            target /= part
+            if target.is_symlink() or (target.exists() and not target.is_dir()):
+                raise WoonError("Google incoming source must use a regular Vault folder")
+        desired_profile = {
+            "id": profile_id,
+            "name": "Google Calendar",
+            "folder": folder,
+            "editable": True,
+            "enabled": True,
+            "recursive": True,
+            "tag": "",
+            "properties": {
+                "allDay": "allDay",
+                "category": "category",
+                "end": "end",
+                "endTime": "endTime",
+                "start": "date",
+                "startTime": "startTime",
+                "title": "title",
+            },
+        }
+        matches = [profile for profile in profiles if profile["id"] == profile_id]
+        if len(matches) > 1:
+            raise WoonError("Google incoming source has duplicate profile IDs")
+        if matches and (
+            any(
+                matches[0].get(key) != value
+                for key, value in desired_profile.items()
+                if key != "name"
+            )
+            or "source" in matches[0]
+        ):
+            raise WoonError(
+                "Google incoming source already has a different configuration; preserve"
+            )
+        for profile in profiles:
+            if profile["id"] == profile_id or profile.get("enabled") is False:
+                continue
+            source = profile.get("source", {})
+            source = source if isinstance(source, dict) else {}
+            other = source.get("path") or profile.get("folder")
+            if not isinstance(other, str) or not other:
+                continue
+            other_path = Path(other.strip("/"))
+            recursive = (
+                source.get("recursive") is not False and profile.get("recursive") is not False
+            )
+            if (
+                Path(folder) == other_path
+                or other_path.is_relative_to(Path(folder))
+                or (recursive and Path(folder).is_relative_to(other_path))
+            ):
+                raise WoonError("Google incoming folder overlaps another enabled source; preserve")
+        google = configuration.get("googleCalendar")
+        if not isinstance(google, dict):
+            raise WoonError("Link Calendar googleCalendar must be an existing object")
+        selections = google.get("sourceProfileIds", [])
+        if not isinstance(selections, list) or not all(isinstance(p, str) for p in selections):
+            raise WoonError("Google Calendar sourceProfileIds must be a list of strings")
+        if google.get("incomingProfileId") not in (None, "", profile_id):
+            raise WoonError("Google Calendar already has a different incoming source; preserve")
+        if selections.count(profile_id) > 1:
+            raise WoonError("Google incoming source has duplicate selections; preserve")
+        if not matches:
+            configuration[collection] = [*profiles, desired_profile]
+        if profile_id not in selections:
+            google["sourceProfileIds"] = [*selections, profile_id]
+        google["incomingProfileId"] = profile_id
+        changed = configuration != json.loads(before)
+        receipt = {
+            "action": "configure-google-two-way-source",
+            "applied": apply,
+            "changed": changed,
+            "plugin": {"id": LINK_CALENDAR_ID, "version": manifest["version"]},
+            "source_profile_id": profile_id,
+            "source_folder": folder,
+            "profile_collection": collection,
+            "added_profile": not matches,
+            "before_sha256": before_hash,
+            "preserved": ["other-profiles", "google-account-and-records", "source-documents"],
+            "remote_writes": 0,
+            "ui_verified": False,
+            "sync_verified": False,
+        }
+        if not apply or not changed:
+            return receipt
+        return self._write_link_calendar_settings(configuration, before, receipt)
+
+    def disable_runnable_remote_execution(
+        self, *, apply: bool = False, expected_settings_sha256: str | None = None
+    ) -> dict[str, Any]:
+        """Disable only remote execution; do not pair, reload, or invoke a runner.
+
+        Preview is read-only. Apply pins the existing settings bytes and records
+        a separate disk verification; a loaded plugin still needs a policy read.
+        """
+
+        def operation() -> dict[str, Any]:
+            self._require_vault()
+            plugin_id = RUNNABLE_CODE_BLOCKS_ID
+            settings_path = self._plugins / plugin_id / "data.json"
+            _require_vault_local_file(self._vault, settings_path, "Runnable settings")
+            assets: dict[str, str] = {}
+            for name in REQUIRED_ASSETS:
+                asset = self._plugins / plugin_id / name
+                _require_vault_local_file(self._vault, asset, "Runnable runtime asset")
+                assets[name] = _sha256(asset.read_bytes())
+            manifest = self._installed_manifest(plugin_id)
+            before = settings_path.read_bytes()
+            before_hash = _sha256(before)
+            if apply and expected_settings_sha256 != before_hash:
+                raise WoonError("Runnable settings changed or preview hash is missing; replan")
+            try:
+                configuration = json.loads(before)
+            except (ValueError, UnicodeDecodeError) as error:
+                raise WoonError("Runnable settings must be a valid JSON object") from error
+            if not isinstance(configuration, dict):
+                raise WoonError("Runnable settings must be a JSON object")
+            changed = configuration.get("remoteExecutionEnabled") is not False
+            configuration["remoteExecutionEnabled"] = False
+            receipt = {
+                "action": "disable-runnable-remote-execution",
+                "applied": apply,
+                "changed": changed,
+                "before_sha256": before_hash,
+                "plugin": {"id": plugin_id, "version": manifest["version"]},
+                "asset_sha256": assets,
+                "patch": {"remoteExecutionEnabled": False},
+                "preserved": [
+                    "legacy-and-path-settings",
+                    "local-execution-and-pairing",
+                    "other-settings",
+                ],
+                "disk_policy_verified": False,
+                "runtime_policy_verified": False,
+                "runner_invocations": 0,
+                "remote_writes": 0,
+                "external_transmissions": 0,
+            }
+            if not apply:
+                return receipt
+            return self._write_plugin_settings(
+                plugin_id, configuration, before, receipt, label="Runnable settings"
+            )
+
+        return self._mutate(operation) if apply else operation()
+
+    def runnable_companion_status(self) -> dict[str, Any]:
+        from woon_core.knowledge.runnable_companion import RunnableCompanionManager
+
+        return RunnableCompanionManager(self).status()
+
+    def start_runnable_companion(
+        self,
+        artifact: Path,
+        node: Path,
+        docker: Path,
+        *,
+        apply: bool = False,
+        expected_state: str | None = None,
+    ) -> dict[str, Any]:
+        from woon_core.knowledge.runnable_companion import RunnableCompanionManager
+
+        def operation() -> dict[str, Any]:
+            return RunnableCompanionManager(self).start(
+                artifact,
+                node,
+                docker,
+                apply=apply,
+                expected_state=expected_state,
+            )
+
+        return self._mutate(operation) if apply else operation()
+
+    def pair_runnable_companion(
+        self,
+        cli: Path,
+        vault_name: str,
+        *,
+        apply: bool = False,
+        expected_state: str | None = None,
+    ) -> dict[str, Any]:
+        from woon_core.knowledge.runnable_companion import RunnableCompanionManager
+
+        def operation() -> dict[str, Any]:
+            return RunnableCompanionManager(self).pair(
+                cli,
+                vault_name,
+                apply=apply,
+                expected_state=expected_state,
+            )
+
+        return self._mutate(operation) if apply else operation()
+
+    def stop_runnable_companion(
+        self,
+        pid: int,
+        docker: Path,
+        *,
+        apply: bool = False,
+        expected_state: str | None = None,
+    ) -> dict[str, Any]:
+        from woon_core.knowledge.runnable_companion import RunnableCompanionManager
+
+        def operation() -> dict[str, Any]:
+            return RunnableCompanionManager(self).stop(
+                pid,
+                docker,
+                apply=apply,
+                expected_state=expected_state,
+            )
+
+        return self._mutate(operation) if apply else operation()
+
+    def recover_runnable_companion_orphan(
+        self,
+        pid: int,
+        *,
+        apply: bool = False,
+        expected_state: str | None = None,
+    ) -> dict[str, Any]:
+        from woon_core.knowledge.runnable_companion import RunnableCompanionManager
+
+        def operation() -> dict[str, Any]:
+            return RunnableCompanionManager(self).recover_orphan(
+                pid,
+                apply=apply,
+                expected_state=expected_state,
+            )
+
+        return self._mutate(operation) if apply else operation()
+
+    def _write_link_calendar_settings(
+        self, configuration: dict[str, Any], before: bytes, receipt: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._write_plugin_settings(
+            LINK_CALENDAR_ID, configuration, before, receipt, label="Link Calendar settings"
+        )
+
+    def _write_plugin_settings(
+        self,
+        plugin_id: str,
+        configuration: dict[str, Any],
+        before: bytes,
+        receipt: dict[str, Any],
+        *,
+        label: str,
+    ) -> dict[str, Any]:
+        """Commit a scoped settings change under the caller's mutation lock."""
+
+        settings_path = self._plugins / plugin_id / "data.json"
+        content = (
+            (json.dumps(configuration, ensure_ascii=False, indent=2) + "\n").encode()
+            if receipt["changed"]
+            else before
+        )
+        receipt_id = self._receipt_id()
+        backup = self._local / "backups" / receipt_id / plugin_id / "data.json"
+        receipt_path = self._local / "receipts" / f"{receipt_id}.json"
+        _atomic_write(backup, before)
+        _require_unchanged_file(settings_path, before, label)
+        receipt_content: bytes | None = None
+        try:
+            if content != before:
+                _atomic_write(settings_path, content)
+            _require_unchanged_file(settings_path, content, label)
+            if self._read_json_object(settings_path) != configuration:
+                raise WoonError(f"{label} update could not be verified")
+            if "disk_policy_verified" in receipt:
+                receipt["disk_policy_verified"] = True
+            receipt.update(
+                {
+                    "receipt_id": receipt_id,
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "sha256": _sha256(content),
+                    "backup": backup.relative_to(self._vault).as_posix(),
+                    "verification": "disk-reread; UI-not-checked",
+                }
+            )
+            receipt_content = (json.dumps(receipt, indent=2) + "\n").encode()
+            _atomic_write(receipt_path, receipt_content)
         except Exception as error:
+            # A late write failure may leave our receipt even if a concurrent
+            # settings edit prevents rollback. Never retain that success proof.
+            if receipt_content is not None and _current_file_bytes(receipt_path) == receipt_content:
+                receipt_path.unlink()
             _restore_file_if_owned(
                 settings_path,
                 expected_current=content,
-                previous=settings_before,
-                label="Link Calendar settings",
+                previous=before,
+                label=label,
                 cause=error,
             )
-            receipt_path.unlink(missing_ok=True)
             raise
         return receipt
 
@@ -948,7 +1091,7 @@ class ObsidianPluginService:
                 + (": " + "; ".join(detail) if detail else "")
             )
 
-        asset_hashes, settings_hash, dashboard_hash = self._link_calendar_static_evidence()
+        asset_hashes, settings_hash, version = self._link_calendar_static_evidence()
         receipt_id = self._receipt_id()
         receipt = {
             "receipt_id": receipt_id,
@@ -956,11 +1099,10 @@ class ObsidianPluginService:
             "created_at": datetime.now(UTC).isoformat(),
             "plugin": {
                 "id": LINK_CALENDAR_ID,
-                "version": LINK_CALENDAR_VERSION,
+                "version": version,
                 "assets_sha256": asset_hashes,
             },
             "settings": {"sha256": settings_hash},
-            "dashboard": {"sha256": dashboard_hash},
             "operator_attested_checks": list(LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS),
             "attestation": "manual-operator-confirmation-after-Obsidian-reload",
         }
@@ -981,7 +1123,7 @@ class ObsidianPluginService:
         self._require_vault()
         requested = self._retirable_ids(plugin_ids)
         if FULL_CALENDAR_REMASTERED_ID in requested:
-            self._require_notion_bases_calendar_projection()
+            self._require_link_calendar_ready()
         if NOTION_BASES_ID in requested:
             self._require_link_calendar_ready()
         if LEGACY_SIMPLE_CALENDAR_ID in requested:
@@ -1210,89 +1352,16 @@ class ObsidianPluginService:
             raise WoonError(f"installed Obsidian plugin manifest is invalid: {plugin_id}")
         return manifest
 
-    def _require_notion_bases_calendar_projection(self) -> None:
-        """Fail closed unless the visible calendar is backed by the Core projection."""
-
-        if NOTION_BASES_ID not in self._enabled_ids():
-            raise WoonError("Notion Bases must be enabled before retiring the calendar renderer")
-        database_path = self._vault / APPLE_CALENDAR_NOTION_DATABASE_RELATIVE_PATH
-        dashboard_path = self._vault / APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH
-        if not is_core_calendar_notion_database(database_path):
-            raise WoonError(
-                "Notion Bases database must be generated by the Core calendar projection"
-            )
-        if not is_core_calendar_dashboard(dashboard_path):
-            raise WoonError(
-                "Notion Bases dashboard must be generated by the Core calendar projection"
-            )
-        if database_path.stat().st_mode & 0o777 != 0o400:
-            raise WoonError("Notion Bases database must be read-only")
-        if dashboard_path.stat().st_mode & 0o777 != 0o400:
-            raise WoonError("Notion Bases dashboard must be read-only")
-        database = database_path.read_text(encoding="utf-8")
-        dashboard = dashboard_path.read_text(encoding="utf-8")
-        required_database = ("calendarDateField: Date\n", "calendarViewMode: month\n")
-        required_dashboard = (
-            f"```nb-database\npath: {APPLE_CALENDAR_EVENTS_RELATIVE_PATH}\ntype: calendar\n```\n"
-        )
-        if any(field not in database for field in required_database):
-            raise WoonError("Notion Bases database must use the date-only month view")
-        if required_dashboard not in dashboard:
-            raise WoonError("Notion Bases dashboard must embed the Core event directory")
-        for path in self._vault.joinpath(APPLE_CALENDAR_EVENTS_RELATIVE_PATH).glob("*.md"):
-            if path.name == Path(APPLE_CALENDAR_NOTION_DATABASE_RELATIVE_PATH).name:
-                continue
-            content = path.read_text(encoding="utf-8")
-            if "woon_projection: apple-calendar\n" not in content or "Date: " not in content:
-                raise WoonError("Notion Bases calendar rows must be Core-generated date-only notes")
-
-    def _require_link_calendar_projection(self) -> None:
-        """Require the exact read-only Markdown projection Link Calendar may read."""
-
-        directory = self._vault / LINK_CALENDAR_SOURCE
-        dashboard_path = self._vault / APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH
-        _require_vault_local_directory(self._vault, directory, "Link Calendar source directory")
-        if directory.stat().st_mode & 0o777 != 0o500:
-            raise WoonError("Link Calendar source directory must be Core-owned and read-only")
-        _require_vault_local_file(self._vault, dashboard_path, "Link Calendar dashboard")
-        if not is_core_calendar_dashboard(dashboard_path):
-            raise WoonError("Link Calendar dashboard must be generated by the Core projection")
-        if dashboard_path.stat().st_mode & 0o777 != 0o400:
-            raise WoonError("Link Calendar dashboard must be read-only")
-        dashboard = dashboard_path.read_text(encoding="utf-8")
-        required_dashboard = (
-            f"cssclasses: {LINK_CALENDAR_DASHBOARD_CSS_CLASS}\n"
-            "---\n\n"
-            f"```{LINK_CALENDAR_ID}\n"
-            f"profile: {LINK_CALENDAR_PROFILE_ID}\n"
-            "```\n"
-        )
-        if required_dashboard not in dashboard:
-            raise WoonError("Link Calendar dashboard must use the Core source profile")
-        for path in directory.glob("*.md"):
-            _require_vault_local_file(self._vault, path, "Link Calendar event")
-            content = path.read_text(encoding="utf-8")
-            if (
-                "woon_projection: apple-calendar\n" not in content
-                or "Date: " not in content
-                or "Category: " not in content
-                or "Category ID: " not in content
-            ):
-                raise WoonError("Link Calendar rows must be Core-generated categorized notes")
-            if path.stat().st_mode & 0o777 != 0o400:
-                raise WoonError("Link Calendar rows must be read-only")
-
     def _require_link_calendar_ready(self) -> None:
         """Fail closed unless static evidence and a matching manual attestation exist."""
 
-        asset_hashes, settings_hash, dashboard_hash = self._link_calendar_static_evidence()
+        asset_hashes, settings_hash, version = self._link_calendar_static_evidence()
         if not self._matching_receipt(
             "attest-link-calendar-runtime",
             LINK_CALENDAR_ID,
-            LINK_CALENDAR_VERSION,
+            version,
             asset_hashes=asset_hashes,
             settings_hash=settings_hash,
-            dashboard_hash=dashboard_hash,
             attestation_checks=LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS,
         ):
             raise WoonError(
@@ -1310,33 +1379,18 @@ class ObsidianPluginService:
         self._require_verified_local_build(LINKED_GRAPH_ID, LINKED_GRAPH_VERSION)
 
     def _link_calendar_static_evidence(self) -> tuple[dict[str, str], str, str]:
-        """Return hashes only after install, activation, settings, and projection verify."""
+        """Bind runtime evidence to the installed build and provider-neutral settings."""
 
-        self._require_link_calendar_projection()
         manifest = self._installed_manifest(LINK_CALENDAR_ID)
-        if manifest["version"] != LINK_CALENDAR_VERSION:
-            raise WoonError("Link Calendar version is not approved for legacy retirement")
         if LINK_CALENDAR_ID not in self._enabled_ids():
             raise WoonError("Link Calendar must be enabled before retiring the legacy plugin")
-        asset_hashes = self._require_verified_local_build(LINK_CALENDAR_ID, LINK_CALENDAR_VERSION)
+        version = manifest["version"]
+        asset_hashes = self._require_verified_local_build(LINK_CALENDAR_ID, version)
         settings_path = self._plugins / LINK_CALENDAR_ID / "data.json"
         _require_vault_local_file(self._vault, settings_path, "Link Calendar settings")
-        configuration = self._read_json_object(settings_path)
-        _validate_link_calendar_configuration(configuration)
+        self._read_json_object(settings_path)
         settings_hash = _sha256(settings_path.read_bytes())
-        if not self._matching_receipt(
-            "configure-link-calendar",
-            LINK_CALENDAR_ID,
-            LINK_CALENDAR_VERSION,
-            settings_hash=settings_hash,
-        ):
-            raise WoonError(
-                "Link Calendar configuration receipt does not match the installed settings"
-            )
-        dashboard_hash = _sha256(
-            (self._vault / APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH).read_bytes()
-        )
-        return asset_hashes, settings_hash, dashboard_hash
+        return asset_hashes, settings_hash, version
 
     def _require_verified_local_build(self, plugin_id: str, version: str) -> dict[str, str]:
         try:
@@ -1492,345 +1546,6 @@ class ObsidianPluginService:
                 "Obsidian plugin mutation lock",
             )
 
-    def _prepare_prisma_virtual_events_store(self, backup_root: Path) -> None:
-        """Keep Prisma's empty internal store hidden and out of the event-note contract."""
-
-        events_directory = self._vault / PRISMA_CALENDAR_EVENTS_DIRECTORY
-        events_directory.mkdir(parents=True, exist_ok=True)
-        original_mode = events_directory.stat().st_mode & 0o777
-        events_directory.chmod(0o700)
-        legacy_store = events_directory / "Virtual Events.md"
-        hidden_store = events_directory / PRISMA_VIRTUAL_EVENTS_FILENAME
-        try:
-            if legacy_store.exists():
-                if legacy_store.read_text(encoding="utf-8") != PRISMA_EMPTY_VIRTUAL_EVENTS:
-                    raise WoonError("Prisma virtual events store is not empty")
-                backup = backup_root / PRISMA_CALENDAR_ID / legacy_store.name
-                backup.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(legacy_store, backup)
-            if hidden_store.exists():
-                if hidden_store.read_text(encoding="utf-8") != PRISMA_EMPTY_VIRTUAL_EVENTS:
-                    raise WoonError("Prisma hidden virtual events store is not empty")
-            else:
-                _atomic_write(
-                    hidden_store,
-                    PRISMA_EMPTY_VIRTUAL_EVENTS.encode("utf-8"),
-                )
-            hidden_store.chmod(0o400)
-        finally:
-            events_directory.chmod(original_mode)
-
-    def _retire_prisma_virtual_events_store(self, backup_root: Path) -> list[str]:
-        """Back up only Prisma's known-empty support files before retiring the renderer."""
-
-        events_directory = self._vault / PRISMA_CALENDAR_EVENTS_DIRECTORY
-        if not events_directory.exists():
-            return []
-        original_mode = events_directory.stat().st_mode & 0o777
-        events_directory.chmod(0o700)
-        retired: list[str] = []
-        try:
-            for filename in ("Virtual Events.md", PRISMA_VIRTUAL_EVENTS_FILENAME):
-                source = events_directory / filename
-                if not source.exists():
-                    continue
-                if (
-                    not source.is_file()
-                    or source.read_text(encoding="utf-8") != PRISMA_EMPTY_VIRTUAL_EVENTS
-                ):
-                    raise WoonError("Prisma virtual events store is not empty")
-                destination = backup_root / PRISMA_CALENDAR_ID / filename
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(source, destination)
-                retired.append(source.relative_to(self._vault).as_posix())
-        finally:
-            events_directory.chmod(original_mode)
-        return retired
-
     @staticmethod
     def _receipt_id() -> str:
         return datetime.now(UTC).strftime("obsidian-plugin-%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:8]
-
-
-def _link_calendar_source_profile() -> dict[str, Any]:
-    """Return the single Woon-managed profile understood by Link Calendar 2.0."""
-
-    return {
-        "id": LINK_CALENDAR_PROFILE_ID,
-        "name": "Apple Calendar",
-        "enabled": True,
-        "source": {
-            "type": "folder",
-            "path": LINK_CALENDAR_SOURCE,
-            "recursive": False,
-            "tag": "",
-        },
-        "editable": False,
-        "properties": dict(LINK_CALENDAR_PROPERTY_FIELDS),
-    }
-
-
-def _link_calendar_configuration(existing: Mapping[str, Any]) -> dict[str, Any]:
-    """Preserve user settings while deterministically upserting Woon's source profile."""
-
-    configuration = dict(existing)
-    if "showAgenda" not in configuration and "showContext" in configuration:
-        configuration["showAgenda"] = configuration["showContext"] is not False
-    configuration.pop("showContext", None)
-    raw_profiles = configuration.get("sourceProfiles", [])
-    if not isinstance(raw_profiles, list) or not all(
-        isinstance(profile, dict) for profile in raw_profiles
-    ):
-        raise WoonError("Link Calendar sourceProfiles must be a list of objects")
-    profile_ids = [profile.get("id") for profile in raw_profiles]
-    if any(not isinstance(profile_id, str) or not profile_id for profile_id in profile_ids):
-        raise WoonError("Link Calendar source profile IDs must be non-empty strings")
-    if len(profile_ids) != len(set(profile_ids)):
-        raise WoonError("Link Calendar source profile IDs must be unique")
-
-    managed_profile = _link_calendar_source_profile()
-    configuration["schemaVersion"] = 1
-    configuration["sourceProfiles"] = [
-        *(profile for profile in raw_profiles if profile["id"] != LINK_CALENDAR_PROFILE_ID),
-        managed_profile,
-    ]
-    return configuration
-
-
-def _validate_link_calendar_configuration(configuration: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the verified Woon profile or fail closed on a writable/drifted source."""
-
-    profiles = configuration.get("sourceProfiles")
-    matching = (
-        [profile for profile in profiles if profile.get("id") == LINK_CALENDAR_PROFILE_ID]
-        if isinstance(profiles, list) and all(isinstance(profile, dict) for profile in profiles)
-        else []
-    )
-    expected = _link_calendar_source_profile()
-    if configuration.get("schemaVersion") != 1 or matching != [expected]:
-        raise WoonError("Link Calendar read-only source profile could not be verified")
-    return expected
-
-
-def _prisma_calendar_configuration(version: str) -> dict[str, Any]:
-    """Use Prisma's documented frontmatter keys without enabling network providers."""
-
-    return {
-        "version": version,
-        "tutorialCompleted": True,
-        "checkForReleaseUpdates": False,
-        "calendars": [
-            {
-                "id": "woon-apple-calendar",
-                "name": "Apple Calendar",
-                "enabled": True,
-                "directory": PRISMA_CALENDAR_EVENTS_DIRECTORY,
-                "startProp": "Start Date",
-                "endProp": "End Date",
-                "dateProp": "Date",
-                "allDayProp": "All Day",
-                "titleProp": "title",
-                "calendarTitleProp": "Calendar Title",
-                "locale": "ko",
-                "indexSubdirectories": False,
-                "autoAssignZettelId": "disabled",
-                "showRibbonIcon": True,
-                "showDurationField": False,
-                "showStopwatch": False,
-                "markPastInstancesAsDone": False,
-                "sortingStrategy": "none",
-                "defaultView": "dayGridMonth",
-                "defaultMobileView": "dayGridMonth",
-                "hourStart": 7,
-                "hourEnd": 23,
-                "slotDurationMinutes": 30,
-                "density": "comfortable",
-                "thickerHourLines": True,
-                "toolbarButtons": list(PRISMA_READONLY_TOOLBAR),
-                "mobileToolbarButtons": list(PRISMA_READONLY_TOOLBAR),
-                "batchActionButtons": [],
-                "contextMenuItems": list(PRISMA_READONLY_CONTEXT_MENU),
-                "enableNotifications": False,
-                "notificationSound": False,
-                "titleAutocomplete": False,
-                "autoAssignCategoryByName": False,
-                "autoAssignCategoryByIncludes": False,
-                "showDurationInTitle": False,
-                "colorMode": "off",
-                "showEventColorDots": False,
-                "defaultNodeColor": "#68737a",
-                "virtualEventsFileName": PRISMA_VIRTUAL_EVENTS_STEM,
-            }
-        ],
-        "caldav": {
-            "accounts": [],
-            "enableAutoSync": False,
-            "syncOnStartup": False,
-            "notifyOnSync": False,
-        },
-        "icsSubscriptions": {
-            "subscriptions": [],
-            "enableAutoSync": False,
-            "syncOnStartup": False,
-            "notifyOnSync": False,
-        },
-    }
-
-
-def _full_calendar_configuration(version: str) -> dict[str, Any]:
-    """Use FCR's local ICS source without credentials, network accounts, or edit features."""
-
-    return {
-        "calendarSources": [
-            {
-                "type": "ical",
-                "id": "ical-woon-apple",
-                "name": "Apple Calendar",
-                "url": APPLE_CALENDAR_ICS_RELATIVE_PATH,
-                "color": FULL_CALENDAR_SOURCE_COLOR,
-            }
-        ],
-        "defaultCalendar": 0,
-        "firstDay": 1,
-        "initialView": {"desktop": "dayGridMonth", "mobile": "dayGridMonth"},
-        "timeFormat24h": True,
-        "clickToCreateEventFromMonthView": False,
-        "displayTimezone": "Asia/Seoul",
-        "lastSystemTimezone": "Asia/Seoul",
-        "enableAdvancedCategorization": False,
-        "chrono_analyser_config": None,
-        "categorySettings": [],
-        "useCustomGoogleClient": False,
-        "googleClientId": "",
-        "googleClientSecret": "",
-        "googleUseCopyPasteAuth": False,
-        "googleAccounts": [],
-        "useCustomMicrosoftClient": False,
-        "microsoftClientId": "",
-        "microsoftProxyBaseUrl": "",
-        "microsoftAccounts": [],
-        "enableLocalServer": False,
-        "localServerPort": 8540,
-        "useLegacyPlaintextCredentials": False,
-        "businessHours": {
-            "enabled": False,
-            "daysOfWeek": [1, 2, 3, 4, 5],
-            "startTime": "09:00",
-            "endTime": "17:00",
-        },
-        "enableBackgroundEvents": False,
-        "enableReminders": False,
-        "enableDefaultReminder": False,
-        "defaultReminderMinutes": 10,
-        "workspaces": [],
-        "activeWorkspace": None,
-        "showEventInStatusBar": False,
-        "highlightCurrentOrNextEvent": False,
-        "slotMinTime": "00:00",
-        "slotMaxTime": "24:00",
-        "allDaySlot": True,
-        "timeGridDayHeaderFormat": "day-mmdd",
-        "weekends": True,
-        "hiddenDays": [],
-        "dayMaxEvents": 4,
-        "activityWatch": {
-            "enabled": False,
-            "apiUrl": "http://127.0.0.1:5600",
-            "lastSyncTime": 0,
-            "autoSyncEnabled": False,
-            "autoSyncIntervalMins": 10,
-            "targetCalendarId": "",
-            "syncStrategy": "auto",
-            "customDateStart": "",
-            "customDateEnd": "",
-            "profiles": [],
-        },
-        "tasksIntegration": {
-            "backlogDateTarget": "scheduledDate",
-            "calendarDisplayDateTarget": "scheduledDate",
-            "openEditModalAfterBacklogDrop": False,
-            "taskDisplayFormat": "dayPlanner",
-            "includeGlobalQueryInBacklog": False,
-            "backlogQuery": "",
-        },
-        "fcrReminderCompanion": {"enabled": False, "apiUrl": "http://127.0.0.1:45677"},
-        "apiTokens": {},
-        "authorizedTokens": {},
-        "milestones": {"counters": {}, "unlockedAt": {}, "shown": {}},
-        "enableMonthlyStatsReport": False,
-        "lastMonthlyMilestonesGeneratedMonth": None,
-        "lastMonthlyMilestonesCheckDate": None,
-        "milestoneNotifierDuration": 8000,
-        "currentVersion": version,
-        "linkedNotesDirectory": "",
-        "linkedNoteLinkStrategy": "deadline",
-        "taskBacklogLastProviderId": "",
-        "caldavTaskInboxLastCalendarId": "",
-        "linkedNoteTemplate": "",
-        "enableLinkedNoteTemplatesPreset": False,
-        "linkedNoteTemplatesPresets": [],
-        "weatherCity": "",
-        "weatherLatitude": None,
-        "weatherLongitude": None,
-        "weatherHide": True,
-        "weatherInputMode": "city",
-        "weatherUnit": "C",
-        "openDailyNoteOnDateClick": False,
-        "breakTimer": {
-            "enabled": False,
-            "intervalMins": 60,
-            "idleThresholdMins": 30,
-            "breakDurationSecs": 30,
-        },
-    }
-
-
-def _validate_full_calendar_configuration(configuration: object, version: str) -> None:
-    """Fail closed if the renderer would gain a writable or external data path."""
-
-    if not isinstance(configuration, dict):
-        raise WoonError("Full Calendar Remastered configuration could not be verified")
-    sources = configuration.get("calendarSources")
-    source = sources[0] if isinstance(sources, list) and len(sources) == 1 else None
-    expected_source = {
-        "type": "ical",
-        "id": "ical-woon-apple",
-        "name": "Apple Calendar",
-        "url": APPLE_CALENDAR_ICS_RELATIVE_PATH,
-        "color": FULL_CALENDAR_SOURCE_COLOR,
-    }
-    expected_disabled = {
-        "clickToCreateEventFromMonthView": False,
-        "enableAdvancedCategorization": False,
-        "useCustomGoogleClient": False,
-        "googleClientId": "",
-        "googleClientSecret": "",
-        "googleAccounts": [],
-        "useCustomMicrosoftClient": False,
-        "microsoftClientId": "",
-        "microsoftAccounts": [],
-        "enableLocalServer": False,
-        "enableReminders": False,
-        "enableDefaultReminder": False,
-        "activityWatch": {"enabled": False},
-        "apiTokens": {},
-        "authorizedTokens": {},
-        "linkedNotesDirectory": "",
-        "openDailyNoteOnDateClick": False,
-    }
-    if (
-        source != expected_source
-        or configuration.get("initialView") != {"desktop": "dayGridMonth", "mobile": "dayGridMonth"}
-        or configuration.get("dayMaxEvents") != 4
-        or configuration.get("currentVersion") != version
-    ):
-        raise WoonError("Full Calendar Remastered configuration could not be verified")
-    for key, expected in expected_disabled.items():
-        actual = configuration.get(key)
-        if isinstance(expected, dict):
-            if not isinstance(actual, dict) or any(
-                actual.get(field) != value for field, value in expected.items()
-            ):
-                raise WoonError("Full Calendar Remastered configuration could not be verified")
-        elif actual != expected:
-            raise WoonError("Full Calendar Remastered configuration could not be verified")

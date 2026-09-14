@@ -1,7 +1,7 @@
 version: 1
 release: 0.7.2
-approved_plugin_versions: [0.7.2, 0.7.3]
-artifact_sha256: fdb5b2aa2247535d13a0fe0919b41fbacab85f46f2505f2a5fda48195e68327c
+approved_plugin_versions: [0.7.2, 0.7.3, 0.7.4]
+artifact_sha256: eb90564f236c1e9ef571979bb4661e44cd85fe83c05d2831e02c2420840acc35
 host: 127.0.0.1
 port: 17171
 protocol_version: 1

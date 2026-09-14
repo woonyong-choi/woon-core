@@ -8,33 +8,20 @@ from pathlib import Path
 
 import pytest
 
-from woon_core.calendar.projection import (
-    APPLE_CALENDAR_ICS_RELATIVE_PATH,
-    PRISMA_EMPTY_VIRTUAL_EVENTS,
-    PRISMA_VIRTUAL_EVENTS_FILENAME,
-)
 from woon_core.errors import WoonError
 from woon_core.knowledge import obsidian_plugins
 from woon_core.knowledge.obsidian_plugins import (
     FULL_CALENDAR_REMASTERED_ID,
-    FULL_CALENDAR_SOURCE_COLOR,
     LEGACY_CONTEXT_CALENDAR_ID,
     LEGACY_CONTEXT_GRAPH_ID,
     LEGACY_SIMPLE_CALENDAR_ID,
     LINK_CALENDAR_ID,
     LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS,
-    LINK_CALENDAR_PROFILE_ID,
-    LINK_CALENDAR_PROPERTY_FIELDS,
-    LINK_CALENDAR_SOURCE,
     LINK_CALENDAR_VERSION,
     LINKED_GRAPH_ID,
     LINKED_GRAPH_VERSION,
     NOTION_BASES_ID,
-    PRISMA_CALENDAR_EVENTS_DIRECTORY,
     PRISMA_CALENDAR_ID,
-    PRISMA_READONLY_CONTEXT_MENU,
-    PRISMA_READONLY_TOOLBAR,
-    PRISMA_VIRTUAL_EVENTS_STEM,
     RUNNABLE_CODE_BLOCKS_ID,
     RUNNABLE_CODE_BLOCKS_VERSION,
     ObsidianPluginService,
@@ -75,114 +62,289 @@ def _vault(tmp_path: Path) -> Path:
     return vault
 
 
-def _write_core_notion_bases_projection(vault: Path) -> None:
-    events = vault / PRISMA_CALENDAR_EVENTS_DIRECTORY
-    events.mkdir(parents=True)
-    (events / "_database.md").write_text(
-        """---
-notion-bases: true
-woon_projection: apple-calendar-notion-bases
-schema:
-  - id: Date
-    name: 날짜
-    type: date
-    visible: false
-views:
-  - id: apple-calendar-month
-    name: 월간 일정
-    type: calendar
-    filters: []
-    sorts: []
-    hiddenColumns:
-      - Date
-    columnWidths: {}
-    calendarDateField: Date
-    calendarViewMode: month
----
-""",
-        encoding="utf-8",
+def test_retire_apple_source_preserves_google_data_and_is_idempotent(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    plugin = vault / ".obsidian/plugins/link-calendar"
+    plugin.mkdir(parents=True)
+    (plugin / "manifest.json").write_text(json.dumps({"id": "link-calendar", "version": "9.0"}))
+    settings = plugin / "data.json"
+    configuration = {
+        "sourceProfiles": [{"id": "woon-apple-calendar"}, {"id": "personal", "editable": True}],
+        "googleCalendar": {
+            "sourceProfileIds": ["personal", "woon-apple-calendar"],
+            "calendarId": "existing-calendar",
+            "refreshToken": "private-secret",
+            "records": {"old-event": {"remoteId": "existing-google-event"}},
+        },
+        "customSetting": {"preserve": True},
+    }
+    settings.write_text(json.dumps(configuration))
+    before = settings.read_bytes()
+    document = vault / "existing-apple-event.md"
+    document.write_text("Existing event remains.\n")
+    service = ObsidianPluginService(vault)
+    preview = service.retire_apple_calendar_source()
+    assert preview["changed"] is True and preview["applied"] is False
+    assert settings.read_bytes() == before
+    assert not (vault / ".local").exists()
+    result = service.retire_apple_calendar_source(
+        apply=True, expected_settings_sha256=preview["before_sha256"]
     )
-    (events / "2026-08-18-example.md").write_text(
-        """---
-type: calendar-event
-Date: 2026-08-18
-woon_projection: apple-calendar
----
-""",
-        encoding="utf-8",
+    expected = json.loads(before)
+    expected["sourceProfiles"] = [configuration["sourceProfiles"][1]]
+    expected["googleCalendar"]["sourceProfileIds"] = ["personal"]
+    assert json.loads(settings.read_bytes()) == expected
+    assert (vault / result["backup"]).read_bytes() == before
+    assert document.read_text() == "Existing event remains.\n"
+    assert "private-secret" not in json.dumps(result)
+    assert result["remote_writes"] == 0 and result["ui_verified"] is False
+    current = settings.read_bytes()
+    again = service.retire_apple_calendar_source(
+        apply=True, expected_settings_sha256=hashlib.sha256(current).hexdigest()
     )
-    dashboard = vault / "inbox/calendar/apple-calendar.md"
-    dashboard.parent.mkdir(parents=True, exist_ok=True)
-    dashboard.write_text(
-        """---
-woon_projection: apple-calendar-dashboard
----
-
-```nb-database
-path: inbox/calendar/events
-type: calendar
-```
-""",
-        encoding="utf-8",
-    )
-    for path in (*events.glob("*.md"), dashboard):
-        path.chmod(0o400)
-    events.chmod(0o500)
+    assert again["changed"] is False and settings.read_bytes() == current
 
 
-def _write_core_link_calendar_projection(vault: Path) -> None:
-    events = vault / LINK_CALENDAR_SOURCE
-    events.mkdir(parents=True)
-    (events / "일정.md").write_text(
-        """---
-type: calendar-event
-title: 일정
-publish: false
-access: local-only
-status: Generated
-source: apple-calendar-readonly
-calendar: Woon 일정
-Date: 2026-08-18
-Category: 학습
-Category ID: learning
-All Day: true
-woon_projection: apple-calendar
----
-""",
-        encoding="utf-8",
+@pytest.mark.parametrize("remote", [None, True, False])
+def test_disable_runnable_remote_preserves_legacy_settings_and_secrets(
+    tmp_path: Path,
+    remote: bool | None,
+) -> None:
+    vault = _vault(tmp_path)
+    plugin = vault / ".obsidian/plugins" / RUNNABLE_CODE_BLOCKS_ID
+    plugin.mkdir()
+    _, assets = _release(RUNNABLE_CODE_BLOCKS_ID, "0.7.1", "https://example.invalid")
+    for name, content in assets.items():
+        (plugin / name).write_bytes(content)
+    configuration = {
+        "kotlinCompilerPath": "/old/compiler",
+        "javaPath": "/old/java",
+        "localExecutionEnabled": False,
+        "localRunnerEndpoint": "http://127.0.0.1:17171",
+        "legacyToken": "do-not-print-this-secret",
+        "custom": {"unchanged": [1, 2]},
+    }
+    if remote is not None:
+        configuration["remoteExecutionEnabled"] = remote
+    settings = plugin / "data.json"
+    settings.write_text(json.dumps(configuration) + "\n\n")
+    before = settings.read_bytes()
+    enabled = (vault / ".obsidian/community-plugins.json").read_bytes()
+    service = ObsidianPluginService(vault)
+    preview = service.disable_runnable_remote_execution()
+    assert settings.read_bytes() == before
+    assert not (vault / ".local").exists()
+    assert preview["changed"] is (remote is not False)
+    applied = service.disable_runnable_remote_execution(
+        apply=True, expected_settings_sha256=preview["before_sha256"]
     )
-    dashboard = vault / "inbox/calendar/apple-calendar.md"
-    dashboard.parent.mkdir(parents=True, exist_ok=True)
-    dashboard.write_text(
-        """---
-type: calendar-dashboard
-title: Apple Calendar
-publish: false
-access: local-only
-status: Generated
-source: apple-calendar-readonly
-woon_projection: apple-calendar-dashboard
-cssclasses: link-calendar-dashboard
----
+    assert json.loads(settings.read_bytes()) == {**configuration, "remoteExecutionEnabled": False}
+    assert (vault / applied["backup"]).read_bytes() == before
+    assert applied["sha256"] == hashlib.sha256(settings.read_bytes()).hexdigest()
+    assert applied["disk_policy_verified"] is True
+    assert applied["runtime_policy_verified"] is False
+    assert applied["runner_invocations"] == applied["external_transmissions"] == 0
+    assert "do-not-print-this-secret" not in json.dumps(applied)
+    assert (vault / ".obsidian/community-plugins.json").read_bytes() == enabled
+    if remote is False:
+        assert settings.read_bytes() == before
+    current = settings.read_bytes()
+    repeated = service.disable_runnable_remote_execution(
+        apply=True, expected_settings_sha256=applied["sha256"]
+    )
+    assert repeated["changed"] is False and settings.read_bytes() == current
+    for path in (vault / ".local/woon-knowledge/obsidian-plugins").rglob("*.json"):
+        assert path.stat().st_mode & 0o777 == 0o600
 
-```link-calendar
-profile: woon-apple-calendar
-```
-""",
-        encoding="utf-8",
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "retire_apple_calendar_source",
+        "configure_google_two_way_source",
+        "disable_runnable_remote_execution",
+    ],
+)
+def test_calendar_source_change_rejects_stale_preview_and_rolls_back_receipt_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    vault = _vault(tmp_path)
+    plugin_id = (
+        RUNNABLE_CODE_BLOCKS_ID if action.startswith("disable_runnable") else LINK_CALENDAR_ID
     )
-    for path in (*events.glob("*.md"), dashboard):
-        path.chmod(0o400)
-    events.chmod(0o500)
+    plugin = vault / ".obsidian/plugins" / plugin_id
+    plugin.mkdir(parents=True)
+    _, assets = _release(plugin_id, "9.0", "https://example.invalid")
+    for name, content in assets.items():
+        (plugin / name).write_bytes(content)
+    settings = plugin / "data.json"
+    settings.write_text('{"sourceProfiles":[{"id":"woon-apple-calendar"}],"googleCalendar":{}}')
+    service = ObsidianPluginService(vault)
+    operation = getattr(service, action)
+    preview = operation()
+    settings.write_text(settings.read_text() + "\n")
+    before = settings.read_bytes()
+    with pytest.raises(WoonError, match="replan"):
+        operation(apply=True, expected_settings_sha256=preview["before_sha256"])
+    assert settings.read_bytes() == before
+    atomic_write = obsidian_plugins._atomic_write
+
+    def fail_receipt(path: Path, content: bytes) -> None:
+        if path.parent.name == "receipts":
+            raise OSError("receipt failed")
+        atomic_write(path, content)
+
+    monkeypatch.setattr(obsidian_plugins, "_atomic_write", fail_receipt)
+    with pytest.raises(OSError, match="receipt failed"):
+        operation(apply=True, expected_settings_sha256=hashlib.sha256(before).hexdigest())
+    assert settings.read_bytes() == before
+    assert not list((vault / ".local/woon-knowledge/obsidian-plugins/receipts").glob("*.json"))
+
+
+def test_runnable_policy_rollback_preserves_concurrent_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    plugin = vault / ".obsidian/plugins" / RUNNABLE_CODE_BLOCKS_ID
+    plugin.mkdir()
+    _, assets = _release(RUNNABLE_CODE_BLOCKS_ID, "0.7.1", "https://example.invalid")
+    for name, content in assets.items():
+        (plugin / name).write_bytes(content)
+    settings = plugin / "data.json"
+    settings.write_text('{"remoteExecutionEnabled":true,"custom":"original"}')
+    before = settings.read_bytes()
+    service = ObsidianPluginService(vault)
+    preview = service.disable_runnable_remote_execution()
+    concurrent = b'{"remoteExecutionEnabled":false,"custom":"user-edit"}'
+    atomic_write = obsidian_plugins._atomic_write
+
+    def interrupt_receipt(path: Path, content: bytes) -> None:
+        if path.parent.name == "receipts":
+            atomic_write(path, content)
+            settings.write_bytes(concurrent)
+            raise OSError("receipt failed")
+        atomic_write(path, content)
+
+    monkeypatch.setattr(obsidian_plugins, "_atomic_write", interrupt_receipt)
+    with pytest.raises(WoonError, match="rollback refused"):
+        service.disable_runnable_remote_execution(
+            apply=True, expected_settings_sha256=preview["before_sha256"]
+        )
+    assert settings.read_bytes() == concurrent
+    backups = list((vault / ".local/woon-knowledge/obsidian-plugins/backups").rglob("data.json"))
+    assert len(backups) == 1 and backups[0].read_bytes() == before
+    assert not list((vault / ".local/woon-knowledge/obsidian-plugins/receipts").glob("*.json"))
+
+
+@pytest.mark.parametrize("collection", ["sourceProfiles", "profiles"])
+def test_google_two_way_source_preserves_account_mappings_and_documents(
+    tmp_path: Path,
+    collection: str,
+) -> None:
+    vault = _vault(tmp_path)
+    plugin = vault / ".obsidian/plugins/link-calendar"
+    plugin.mkdir(parents=True)
+    (plugin / "manifest.json").write_text(json.dumps({"id": "link-calendar", "version": "9.0"}))
+    settings = plugin / "data.json"
+    other = {"id": "user", "folder": "appointments", "editable": False}
+    google = {
+        "enabled": True,
+        "calendar": {"id": "existing", "timeZone": "Asia/Seoul"},
+        "sourceProfileIds": ["user"],
+        "refreshToken": "private-secret",
+        "records": [{"eventId": "keep", "etag": "remote-version", "localKey": "old-event"}],
+    }
+    original = {collection: [other], "googleCalendar": google, "userSetting": {"preserve": True}}
+    settings.write_text(json.dumps(original))
+    before = settings.read_bytes()
+    document = vault / "inbox/calendar/google/existing.md"
+    document.parent.mkdir(parents=True)
+    document.write_bytes(b"User-owned existing note.\n")
+    service = ObsidianPluginService(vault)
+    preview = service.configure_google_two_way_source()
+    assert preview["changed"] is True and preview["applied"] is False
+    assert settings.read_bytes() == before and not (vault / ".local").exists()
+    applied = service.configure_google_two_way_source(
+        apply=True, expected_settings_sha256=preview["before_sha256"]
+    )
+    after = json.loads(settings.read_bytes())
+    assert after[collection][0] == other
+    assert len(after[collection]) == 2
+    profile = after[collection][1]
+    assert profile["id"] == "woon-google-calendar" and profile["folder"] == "inbox/calendar/google"
+    assert profile["editable"] is True and profile["enabled"] is True
+    assert profile["properties"] == {
+        "allDay": "allDay",
+        "category": "category",
+        "end": "end",
+        "endTime": "endTime",
+        "start": "date",
+        "startTime": "startTime",
+        "title": "title",
+    }
+    assert after["googleCalendar"] == {
+        **google,
+        "sourceProfileIds": ["user", "woon-google-calendar"],
+        "incomingProfileId": "woon-google-calendar",
+    }
+    assert after["userSetting"] == original["userSetting"]
+    assert set(after) == set(original)
+    assert document.read_bytes() == b"User-owned existing note.\n"
+    assert list(document.parent.iterdir()) == [document]
+    assert (vault / applied["backup"]).read_bytes() == before
+    assert "private-secret" not in json.dumps(applied)
+    assert applied["remote_writes"] == 0 and applied["sync_verified"] is False
+    current = settings.read_bytes()
+    receipts = list((vault / ".local/woon-knowledge/obsidian-plugins/receipts").glob("*.json"))
+    repeated = service.configure_google_two_way_source(
+        apply=True, expected_settings_sha256=hashlib.sha256(current).hexdigest()
+    )
+    assert repeated["changed"] is False and settings.read_bytes() == current
+    assert (
+        list((vault / ".local/woon-knowledge/obsidian-plugins/receipts").glob("*.json")) == receipts
+    )
+
+
+@pytest.mark.parametrize("conflict", ["existing-id", "overlap", "incoming", "symlink"])
+def test_google_two_way_source_preserves_conflicting_configuration(
+    tmp_path: Path,
+    conflict: str,
+) -> None:
+    vault = _vault(tmp_path)
+    plugin = vault / ".obsidian/plugins/link-calendar"
+    plugin.mkdir(parents=True)
+    (plugin / "manifest.json").write_text(json.dumps({"id": "link-calendar", "version": "9.0"}))
+    settings = plugin / "data.json"
+    configuration = {"sourceProfiles": [], "googleCalendar": {}}
+    if conflict == "existing-id":
+        configuration["sourceProfiles"] = [{"id": "woon-google-calendar", "folder": "user-notes"}]
+    elif conflict == "overlap":
+        configuration["sourceProfiles"] = [{"id": "user", "folder": "inbox", "recursive": True}]
+    elif conflict == "incoming":
+        configuration["googleCalendar"] = {"incomingProfileId": "user-destination"}
+    else:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (vault / "inbox").symlink_to(outside, target_is_directory=True)
+    settings.write_text(json.dumps(configuration))
+    before = settings.read_bytes()
+    service = ObsidianPluginService(vault)
+    with pytest.raises(WoonError, match="Google"):
+        service.configure_google_two_way_source()
+    assert settings.read_bytes() == before
+    assert not (vault / ".local").exists()
 
 
 def test_install_verifies_release_manifest_assets_and_enabled_config(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     releases: dict[str, bytes] = {}
     for plugin_id, version, repository in (
-        (LINK_CALENDAR_ID, "3.3.0", "woonyong-kr/link-calendar"),
-        (LINKED_GRAPH_ID, "0.5.6", "woonyong-kr/linked-graph"),
-        (RUNNABLE_CODE_BLOCKS_ID, "0.2.4", "woonyong-kr/runnable-code-blocks"),
+        (LINK_CALENDAR_ID, "3.3.0", "woonyong-choi/manta-calendar"),
+        (LINKED_GRAPH_ID, "0.5.6", "woonyong-choi/manta-graph"),
+        (RUNNABLE_CODE_BLOCKS_ID, "0.2.4", "woonyong-choi/manta-code-blocks"),
         ("light-mindmap", "1.5.0", "ninglg/light-mindmap"),
         ("markdown-mindmap", "1.4.2", "kikocastro/markdown-mindmap"),
         (PRISMA_CALENDAR_ID, "2.22.0", "Real1tyy/Prisma-Calendar"),
@@ -248,12 +410,11 @@ def test_official_install_preserves_existing_plugin_settings(tmp_path: Path) -> 
     }.items():
         (destination / name).write_bytes(content)
     release, assets = _release(
-        LINKED_GRAPH_ID, "0.5.12", "https://github.com/woonyong-kr/linked-graph"
+        LINKED_GRAPH_ID, "0.5.12", "https://github.com/woonyong-choi/manta-graph"
     )
+    release_endpoint = "https://api.github.com/repos/woonyong-choi/manta-graph/releases/latest"
     downloads = {
-        "https://api.github.com/repos/woonyong-kr/linked-graph/releases/latest": json.dumps(
-            release
-        ).encode(),
+        release_endpoint: json.dumps(release).encode(),
         **{
             f"https://github.com/example/{LINKED_GRAPH_ID}/{name}": content
             for name, content in assets.items()
@@ -411,7 +572,7 @@ def _local_context_graph_build(root: Path, version: str = "0.4.1") -> Path:
             "remote",
             "add",
             "origin",
-            "https://github.com/woonyong-kr/linked-graph.git",
+            "https://github.com/woonyong-choi/manta-graph.git",
         ),
         check=True,
     )
@@ -450,7 +611,7 @@ def _local_link_calendar_build(root: Path, version: str = LINK_CALENDAR_VERSION)
             "remote",
             "add",
             "origin",
-            "https://github.com/woonyong-kr/link-calendar.git",
+            "https://github.com/woonyong-choi/manta-calendar.git",
         ),
         check=True,
     )
@@ -491,7 +652,7 @@ def _local_runnable_code_blocks_build(
             "remote",
             "add",
             "origin",
-            "https://github.com/woonyong-kr/runnable-code-blocks.git",
+            "https://github.com/woonyong-choi/manta-code-blocks.git",
         ),
         check=True,
     )
@@ -507,6 +668,16 @@ def _install_link_calendar(vault: Path, build_root: Path) -> ObsidianPluginServi
         _local_link_calendar_build(build_root),
         LINK_CALENDAR_VERSION,
     )
+    settings = vault / ".obsidian/plugins/link-calendar/data.json"
+    if not settings.exists():
+        settings.write_text(
+            json.dumps(
+                {
+                    "sourceProfiles": [{"id": "personal", "editable": False}],
+                    "googleCalendar": {"sourceProfileIds": ["personal"]},
+                }
+            )
+        )
     return service
 
 
@@ -562,7 +733,7 @@ def test_runnable_code_blocks_local_build_uses_approved_git_source(tmp_path: Pat
     assert receipt["plugin"]["id"] == RUNNABLE_CODE_BLOCKS_ID
     assert receipt["plugin"]["version"] == RUNNABLE_CODE_BLOCKS_VERSION
     assert receipt["plugin"]["source"]["repository"] == (
-        "https://github.com/woonyong-kr/runnable-code-blocks.git"
+        "https://github.com/woonyong-choi/manta-code-blocks.git"
     )
     assert RUNNABLE_CODE_BLOCKS_ID in json.loads(
         (vault / ".obsidian/community-plugins.json").read_text(encoding="utf-8")
@@ -638,7 +809,7 @@ def test_install_local_build_accepts_link_calendar_at_the_pinned_version(
     assert receipt["plugin"]["id"] == LINK_CALENDAR_ID
     assert receipt["plugin"]["version"] == LINK_CALENDAR_VERSION
     assert receipt["plugin"]["source"]["repository"] == (
-        "https://github.com/woonyong-kr/link-calendar.git"
+        "https://github.com/woonyong-choi/manta-calendar.git"
     )
     assert len(receipt["plugin"]["source"]["head_commit"]) == 40
     assert receipt["plugin"]["source"]["clean"] is True
@@ -689,7 +860,7 @@ def test_link_calendar_git_origin_accepts_the_normalized_url_without_git_suffix(
             "remote",
             "set-url",
             "origin",
-            "https://github.com/woonyong-kr/link-calendar",
+            "https://github.com/woonyong-choi/manta-calendar",
         ),
         check=True,
     )
@@ -700,7 +871,7 @@ def test_link_calendar_git_origin_accepts_the_normalized_url_without_git_suffix(
         LINK_CALENDAR_VERSION,
     )
 
-    assert receipt["plugin"]["source"]["repository"].endswith("link-calendar.git")
+    assert receipt["plugin"]["source"]["repository"].endswith("manta-calendar.git")
 
 
 @pytest.mark.parametrize("failure", ["dirty", "wrong-origin", "not-git"])
@@ -890,387 +1061,10 @@ def test_install_local_build_preserves_concurrent_enabled_config_during_rollback
     assert (destination / "main.js").read_text(encoding="utf-8") == "old runtime\n"
 
 
-def test_configure_prisma_calendar_writes_a_read_only_projection_mapping(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    plugin = vault / ".obsidian/plugins" / PRISMA_CALENDAR_ID
-    plugin.mkdir()
-    (plugin / "manifest.json").write_text(
-        json.dumps({"id": PRISMA_CALENDAR_ID, "version": "2.22.0"}), encoding="utf-8"
-    )
-
-    receipt = ObsidianPluginService(vault).configure_prisma_calendar()
-    configuration = json.loads((plugin / "data.json").read_text(encoding="utf-8"))
-
-    assert receipt["plugin"] == {"id": PRISMA_CALENDAR_ID, "version": "2.22.0"}
-    assert receipt["external_sync"] == "disabled"
-    assert receipt["projection_write"] == "core-only"
-    assert receipt["virtual_events_store"] == "hidden-empty-readonly"
-    calendar = configuration["calendars"][0]
-    assert calendar["id"] == "woon-apple-calendar"
-    assert calendar["name"] == "Apple Calendar"
-    assert calendar["enabled"] is True
-    assert calendar["directory"] == PRISMA_CALENDAR_EVENTS_DIRECTORY
-    assert calendar["startProp"] == "Start Date"
-    assert calendar["endProp"] == "End Date"
-    assert calendar["dateProp"] == "Date"
-    assert calendar["allDayProp"] == "All Day"
-    assert calendar["titleProp"] == "title"
-    assert calendar["defaultView"] == "dayGridMonth"
-    assert calendar["defaultMobileView"] == "dayGridMonth"
-    assert calendar["locale"] == "ko"
-    assert calendar["toolbarButtons"] == list(PRISMA_READONLY_TOOLBAR)
-    assert calendar["mobileToolbarButtons"] == list(PRISMA_READONLY_TOOLBAR)
-    assert calendar["contextMenuItems"] == list(PRISMA_READONLY_CONTEXT_MENU)
-    assert calendar["batchActionButtons"] == []
-    assert calendar["enableNotifications"] is False
-    assert calendar["virtualEventsFileName"] == PRISMA_VIRTUAL_EVENTS_STEM
-    assert configuration["caldav"]["accounts"] == []
-    assert configuration["icsSubscriptions"]["subscriptions"] == []
-
-
-def test_configure_prisma_moves_only_its_empty_legacy_virtual_events_store(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    plugin = vault / ".obsidian/plugins" / PRISMA_CALENDAR_ID
-    plugin.mkdir()
-    (plugin / "manifest.json").write_text(
-        json.dumps({"id": PRISMA_CALENDAR_ID, "version": "2.22.0"}), encoding="utf-8"
-    )
-    events = vault / PRISMA_CALENDAR_EVENTS_DIRECTORY
-    events.mkdir(parents=True)
-    legacy_store = events / "Virtual Events.md"
-    legacy_store.write_text(PRISMA_EMPTY_VIRTUAL_EVENTS, encoding="utf-8")
-
-    ObsidianPluginService(vault).configure_prisma_calendar()
-
-    hidden_store = events / PRISMA_VIRTUAL_EVENTS_FILENAME
-    assert not legacy_store.exists()
-    assert hidden_store.read_text(encoding="utf-8") == PRISMA_EMPTY_VIRTUAL_EVENTS
-    assert hidden_store.stat().st_mode & 0o777 == 0o400
-    assert list(
-        (vault / ".local/woon-knowledge/obsidian-plugins/backups").rglob("Virtual Events.md")
-    )
-
-
-def test_configure_full_calendar_remastered_uses_month_only_local_ics(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    plugin = vault / ".obsidian/plugins" / FULL_CALENDAR_REMASTERED_ID
-    plugin.mkdir()
-    (plugin / "manifest.json").write_text(
-        json.dumps({"id": FULL_CALENDAR_REMASTERED_ID, "version": "0.13.5"}),
-        encoding="utf-8",
-    )
-    (vault / ".obsidian/community-plugins.json").write_text(
-        json.dumps(["homepage", FULL_CALENDAR_REMASTERED_ID]), encoding="utf-8"
-    )
-    events = vault / PRISMA_CALENDAR_EVENTS_DIRECTORY
-    events.mkdir(parents=True)
-    support = events / PRISMA_VIRTUAL_EVENTS_FILENAME
-    support.write_text(PRISMA_EMPTY_VIRTUAL_EVENTS, encoding="utf-8")
-
-    receipt = ObsidianPluginService(vault).configure_full_calendar_remastered()
-    configuration = json.loads((plugin / "data.json").read_text(encoding="utf-8"))
-
-    assert receipt["plugin"] == {"id": FULL_CALENDAR_REMASTERED_ID, "version": "0.13.5"}
-    assert receipt["external_sync"] == "disabled"
-    assert receipt["projection_write"] == "core-only"
-    assert receipt["initial_view"] == {"desktop": "dayGridMonth", "mobile": "dayGridMonth"}
-    assert receipt["calendar_source"] == {
-        "type": "ical",
-        "id": "ical-woon-apple",
-        "name": "Apple Calendar",
-        "url": APPLE_CALENDAR_ICS_RELATIVE_PATH,
-        "color": FULL_CALENDAR_SOURCE_COLOR,
-    }
-    assert configuration["dayMaxEvents"] == 4
-    assert configuration["clickToCreateEventFromMonthView"] is False
-    assert configuration["googleAccounts"] == []
-    assert configuration["microsoftAccounts"] == []
-    assert configuration["enableLocalServer"] is False
-    assert configuration["activityWatch"]["enabled"] is False
-    assert not support.exists()
-    assert list(
-        (vault / ".local/woon-knowledge/obsidian-plugins/backups").rglob(
-            PRISMA_VIRTUAL_EVENTS_FILENAME
-        )
-    )
-
-
-def test_configure_full_calendar_rejects_nonempty_prisma_support_file(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    plugin = vault / ".obsidian/plugins" / FULL_CALENDAR_REMASTERED_ID
-    plugin.mkdir()
-    (plugin / "manifest.json").write_text(
-        json.dumps({"id": FULL_CALENDAR_REMASTERED_ID, "version": "0.13.5"}),
-        encoding="utf-8",
-    )
-    (vault / ".obsidian/community-plugins.json").write_text(
-        json.dumps(["homepage", FULL_CALENDAR_REMASTERED_ID]), encoding="utf-8"
-    )
-    events = vault / PRISMA_CALENDAR_EVENTS_DIRECTORY
-    events.mkdir(parents=True)
-    (events / PRISMA_VIRTUAL_EVENTS_FILENAME).write_text(
-        "```prisma-virtual-events\n[{}]\n```\n", encoding="utf-8"
-    )
-
-    with pytest.raises(WoonError, match="Prisma virtual events store is not empty"):
-        ObsidianPluginService(vault).configure_full_calendar_remastered()
-
-
-def test_configure_notion_bases_requires_the_core_owned_month_projection(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    plugin = vault / ".obsidian/plugins" / NOTION_BASES_ID
-    plugin.mkdir()
-    (plugin / "manifest.json").write_text(
-        json.dumps({"id": NOTION_BASES_ID, "version": "1.12.0"}), encoding="utf-8"
-    )
-    (vault / ".obsidian/community-plugins.json").write_text(
-        json.dumps(["homepage", NOTION_BASES_ID]), encoding="utf-8"
-    )
-    _write_core_notion_bases_projection(vault)
-
-    receipt = ObsidianPluginService(vault).configure_notion_bases_calendar()
-
-    assert receipt["plugin"] == {"id": NOTION_BASES_ID, "version": "1.12.0"}
-    assert receipt["database"] == {
-        "path": "inbox/calendar/events/_database.md",
-        "date_field": "Date",
-        "view": "calendar",
-        "view_mode": "month",
-        "card_fields": "title-only",
-    }
-    assert receipt["dashboard"] == "inbox/calendar/apple-calendar.md"
-    assert receipt["external_sync"] == "disabled"
-    assert receipt["projection_write"] == "core-only"
-
-
-def test_configure_link_calendar_preserves_user_settings_and_receipts_readonly_profile(
-    tmp_path: Path,
-) -> None:
-    vault = _vault(tmp_path)
-    _write_core_link_calendar_projection(vault)
-    service = _install_link_calendar(vault, tmp_path)
-    settings = vault / ".obsidian/plugins" / LINK_CALENDAR_ID / "data.json"
-    settings.write_text(
-        json.dumps(
-            {
-                "locale": "ko",
-                "sourceProfiles": [
-                    {
-                        "id": "personal-notes",
-                        "name": "Personal notes",
-                        "enabled": True,
-                        "source": {"type": "folder", "path": "notes", "recursive": True},
-                        "editable": True,
-                        "properties": {"date": "date"},
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    settings_before = settings.read_bytes()
-
-    receipt = service.configure_link_calendar()
-    configured = json.loads(settings.read_text(encoding="utf-8"))
-
-    assert receipt["action"] == "configure-link-calendar"
-    assert receipt["plugin"] == {
-        "id": LINK_CALENDAR_ID,
-        "version": LINK_CALENDAR_VERSION,
-    }
-    assert receipt["source_profile"] == {
-        "id": LINK_CALENDAR_PROFILE_ID,
-        "name": "Apple Calendar",
-        "enabled": True,
-        "source": {
-            "type": "folder",
-            "path": LINK_CALENDAR_SOURCE,
-            "recursive": False,
-            "tag": "",
-        },
-        "editable": False,
-        "properties": dict(LINK_CALENDAR_PROPERTY_FIELDS),
-    }
-    assert configured["locale"] == "ko"
-    assert configured["sourceProfiles"][0]["id"] == "personal-notes"
-    assert configured["sourceProfiles"][1] == receipt["source_profile"]
-    assert "activeSourceProfileId" not in configured
-    backup = vault / receipt["settings"]["backup"]
-    assert backup.read_bytes() == settings_before
-    assert receipt["settings"]["sha256"] == hashlib.sha256(settings.read_bytes()).hexdigest()
-
-
-def test_configure_link_calendar_migrates_legacy_context_calendar_settings_once(
-    tmp_path: Path,
-) -> None:
-    vault = _vault(tmp_path)
-    _write_core_link_calendar_projection(vault)
-    service = _install_link_calendar(vault, tmp_path)
-    legacy = vault / ".obsidian/plugins" / LEGACY_CONTEXT_CALENDAR_ID
-    legacy.mkdir()
-    legacy_settings = legacy / "data.json"
-    legacy_settings.write_text(
-        json.dumps(
-            {
-                "locale": "ko",
-                "showContext": False,
-                "sourceProfiles": [
-                    {
-                        "id": "personal-notes",
-                        "name": "Personal notes",
-                        "enabled": True,
-                        "source": {"type": "folder", "path": "notes", "recursive": True},
-                        "editable": True,
-                        "properties": {"start": "date", "title": "title"},
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    legacy_before = legacy_settings.read_bytes()
-
-    receipt = service.configure_link_calendar()
-    configured_path = vault / ".obsidian/plugins" / LINK_CALENDAR_ID / "data.json"
-    configured = json.loads(configured_path.read_text(encoding="utf-8"))
-
-    assert configured["locale"] == "ko"
-    assert configured["showAgenda"] is False
-    assert "showContext" not in configured
-    assert configured["sourceProfiles"][0]["id"] == "personal-notes"
-    assert receipt["settings"]["migrated_from"] == {
-        "path": ".obsidian/plugins/context-calendar/data.json",
-        "sha256": hashlib.sha256(legacy_before).hexdigest(),
-    }
-    assert legacy_settings.read_bytes() == legacy_before
-
-
-@pytest.mark.parametrize("linked_path", ["directory", "dashboard", "event"])
-def test_configure_link_calendar_rejects_symlinked_projection_paths(
-    tmp_path: Path, linked_path: str
-) -> None:
-    vault = _vault(tmp_path)
-    _write_core_link_calendar_projection(vault)
-    events = vault / LINK_CALENDAR_SOURCE
-    dashboard = vault / "inbox/calendar/apple-calendar.md"
-    if linked_path == "directory":
-        outside = tmp_path / "outside-events"
-        events.chmod(0o700)
-        os.replace(events, outside)
-        events.symlink_to(outside, target_is_directory=True)
-    elif linked_path == "dashboard":
-        outside = tmp_path / "outside-dashboard.md"
-        os.replace(dashboard, outside)
-        dashboard.symlink_to(outside)
-    else:
-        event = events / "일정.md"
-        outside = tmp_path / "outside-event.md"
-        events.chmod(0o700)
-        os.replace(event, outside)
-        event.symlink_to(outside)
-        events.chmod(0o500)
-    service = _install_link_calendar(vault, tmp_path)
-
-    try:
-        with pytest.raises(WoonError, match="regular Vault"):
-            service.configure_link_calendar()
-    finally:
-        if events.is_symlink():
-            events.unlink()
-            outside.chmod(0o700)
-        elif events.exists():
-            events.chmod(0o700)
-            for path in events.iterdir():
-                if path.is_symlink():
-                    path.unlink()
-                elif path.is_file():
-                    path.chmod(0o600)
-        if dashboard.is_symlink():
-            dashboard.unlink()
-        elif dashboard.exists():
-            dashboard.chmod(0o600)
-        if outside.is_file():
-            outside.chmod(0o600)
-
-
-def test_configure_link_calendar_restores_settings_when_receipt_write_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    vault = _vault(tmp_path)
-    _write_core_link_calendar_projection(vault)
-    service = _install_link_calendar(vault, tmp_path)
-    settings = vault / ".obsidian/plugins" / LINK_CALENDAR_ID / "data.json"
-    settings_before = b'{"locale":"en"}\n'
-    settings.write_bytes(settings_before)
-    original_atomic_write = obsidian_plugins._atomic_write
-
-    def fail_receipt(path: Path, content: bytes) -> None:
-        if path.parent.name == "receipts" and b'"configure-link-calendar"' in content:
-            raise OSError("simulated receipt failure")
-        original_atomic_write(path, content)
-
-    monkeypatch.setattr(obsidian_plugins, "_atomic_write", fail_receipt)
-
-    with pytest.raises(OSError, match="simulated receipt failure"):
-        service.configure_link_calendar()
-
-    assert settings.read_bytes() == settings_before
-
-
-def test_configure_link_calendar_rejects_concurrent_settings_drift_without_overwriting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    vault = _vault(tmp_path)
-    _write_core_link_calendar_projection(vault)
-    service = _install_link_calendar(vault, tmp_path)
-    settings = vault / ".obsidian/plugins" / LINK_CALENDAR_ID / "data.json"
-    settings.write_text('{"locale":"en"}\n', encoding="utf-8")
-    concurrent = b'{"locale":"ko","changedBy":"Obsidian"}\n'
-    original_configuration = obsidian_plugins._link_calendar_configuration
-
-    def drift_after_read(existing: dict[str, object]) -> dict[str, object]:
-        configuration = original_configuration(existing)
-        settings.write_bytes(concurrent)
-        return configuration
-
-    monkeypatch.setattr(
-        obsidian_plugins,
-        "_link_calendar_configuration",
-        drift_after_read,
-    )
-
-    with pytest.raises(WoonError, match="changed concurrently"):
-        service.configure_link_calendar()
-
-    assert settings.read_bytes() == concurrent
-
-
-def test_configure_link_calendar_requires_enabled_verified_local_build(
-    tmp_path: Path,
-) -> None:
-    vault = _vault(tmp_path)
-    _write_core_link_calendar_projection(vault)
-    service = _install_link_calendar(vault, tmp_path)
-    (vault / ".obsidian/community-plugins.json").write_text('["homepage"]\n', encoding="utf-8")
-
-    with pytest.raises(WoonError, match="must be enabled"):
-        service.configure_link_calendar()
-
-    (vault / ".obsidian/community-plugins.json").write_text(
-        json.dumps(["homepage", LINK_CALENDAR_ID]), encoding="utf-8"
-    )
-    for receipt in (vault / ".local/woon-knowledge/obsidian-plugins/receipts").glob("*.json"):
-        receipt.unlink()
-
-    with pytest.raises(WoonError, match="verified local-build adapter"):
-        service.configure_link_calendar()
-
-
 def test_link_calendar_static_gate_rejects_install_receipt_without_git_provenance(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
-    _write_core_link_calendar_projection(vault)
     service = _install_link_calendar(vault, tmp_path)
     receipt_root = vault / ".local/woon-knowledge/obsidian-plugins/receipts"
     install_receipt = next(
@@ -1283,51 +1077,14 @@ def test_link_calendar_static_gate_rejects_install_receipt_without_git_provenanc
     install_receipt.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(WoonError, match="verified local-build adapter"):
-        service.configure_link_calendar()
-
-
-def test_configure_link_calendar_is_deterministic_and_does_not_duplicate_profile(
-    tmp_path: Path,
-) -> None:
-    vault = _vault(tmp_path)
-    _write_core_link_calendar_projection(vault)
-    service = _install_link_calendar(vault, tmp_path)
-    settings = vault / ".obsidian/plugins" / LINK_CALENDAR_ID / "data.json"
-
-    service.configure_link_calendar()
-    first = settings.read_bytes()
-    service.configure_link_calendar()
-    second = settings.read_bytes()
-    configuration = json.loads(second)
-
-    assert second == first
-    assert [
-        profile["id"]
-        for profile in configuration["sourceProfiles"]
-        if profile["id"] == LINK_CALENDAR_PROFILE_ID
-    ] == [LINK_CALENDAR_PROFILE_ID]
-
-
-def test_configure_link_calendar_rejects_an_unapproved_local_version(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    _write_core_link_calendar_projection(vault)
-    ObsidianPluginService(vault).install_local_build(
-        LINK_CALENDAR_ID,
-        _local_link_calendar_build(tmp_path, version="2.0.4"),
-        "2.0.4",
-    )
-
-    with pytest.raises(WoonError, match="version must match"):
-        ObsidianPluginService(vault).configure_link_calendar()
+        _attest_link_calendar_runtime(service)
 
 
 def test_attest_link_calendar_runtime_requires_complete_explicit_checklist(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
-    _write_core_link_calendar_projection(vault)
     service = _install_link_calendar(vault, tmp_path)
-    service.configure_link_calendar()
 
     with pytest.raises(WoonError, match="complete UI checklist"):
         service.attest_link_calendar_runtime(["ribbon", "month-view"])
@@ -1342,9 +1099,7 @@ def test_attest_link_calendar_runtime_receipt_binds_current_static_evidence(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
-    _write_core_link_calendar_projection(vault)
     service = _install_link_calendar(vault, tmp_path)
-    service.configure_link_calendar()
 
     receipt = _attest_link_calendar_runtime(service)
 
@@ -1353,7 +1108,7 @@ def test_attest_link_calendar_runtime_receipt_binds_current_static_evidence(
     assert receipt["attestation"] == "manual-operator-confirmation-after-Obsidian-reload"
     assert receipt["plugin"]["assets_sha256"]
     assert receipt["settings"]["sha256"]
-    assert receipt["dashboard"]["sha256"]
+    assert "dashboard" not in receipt
 
 
 def test_retire_legacy_simple_calendar_requires_manual_runtime_attestation(
@@ -1365,9 +1120,7 @@ def test_retire_legacy_simple_calendar_requires_manual_runtime_attestation(
     (legacy / "manifest.json").write_text(
         json.dumps({"id": LEGACY_SIMPLE_CALENDAR_ID, "version": "1.1.1"}), encoding="utf-8"
     )
-    _write_core_link_calendar_projection(vault)
     service = _install_link_calendar(vault, tmp_path)
-    service.configure_link_calendar()
 
     with pytest.raises(WoonError, match="manual operator attestation after reload"):
         service.retire([LEGACY_SIMPLE_CALENDAR_ID])
@@ -1375,26 +1128,6 @@ def test_retire_legacy_simple_calendar_requires_manual_runtime_attestation(
     assert legacy.is_dir()
 
     assert legacy.is_dir()
-
-
-def test_retire_rejects_stale_runtime_receipt_after_dashboard_changes(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    legacy = vault / ".obsidian/plugins" / LEGACY_SIMPLE_CALENDAR_ID
-    legacy.mkdir()
-    (legacy / "manifest.json").write_text(
-        json.dumps({"id": LEGACY_SIMPLE_CALENDAR_ID, "version": "1.1.1"}), encoding="utf-8"
-    )
-    _write_core_link_calendar_projection(vault)
-    service = _install_link_calendar(vault, tmp_path)
-    service.configure_link_calendar()
-    _attest_link_calendar_runtime(service)
-    dashboard = vault / "inbox/calendar/apple-calendar.md"
-    dashboard.chmod(0o600)
-    dashboard.write_text(dashboard.read_text(encoding="utf-8") + "\n", encoding="utf-8")
-    dashboard.chmod(0o400)
-
-    with pytest.raises(WoonError, match="manual operator attestation after reload"):
-        service.retire([LEGACY_SIMPLE_CALENDAR_ID])
 
 
 def test_retire_context_graph_requires_receipted_linked_graph(tmp_path: Path) -> None:
@@ -1439,7 +1172,7 @@ def test_retire_context_graph_keeps_backup_after_linked_graph_validates(tmp_path
     assert (backup / "main.js").read_text(encoding="utf-8") == "legacy runtime\n"
 
 
-def test_retire_notion_bases_requires_link_calendar_projection_and_plugin(
+def test_retire_notion_bases_requires_link_calendar_runtime(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
@@ -1452,7 +1185,7 @@ def test_retire_notion_bases_requires_link_calendar_projection_and_plugin(
         json.dumps([NOTION_BASES_ID]), encoding="utf-8"
     )
 
-    with pytest.raises(WoonError, match="Link Calendar source directory"):
+    with pytest.raises(WoonError, match="link-calendar"):
         ObsidianPluginService(vault).retire([NOTION_BASES_ID])
 
 
@@ -1465,9 +1198,7 @@ def test_retire_notion_bases_keeps_a_backup_after_link_calendar_validates(
     (notion_bases / "manifest.json").write_text(
         json.dumps({"id": NOTION_BASES_ID, "version": "1.12.0"}), encoding="utf-8"
     )
-    _write_core_link_calendar_projection(vault)
     service = _install_link_calendar(vault, tmp_path)
-    service.configure_link_calendar()
     _attest_link_calendar_runtime(service)
 
     receipt = service.retire([NOTION_BASES_ID])
@@ -1487,7 +1218,7 @@ def test_retire_legacy_simple_calendar_requires_verified_link_calendar(
         json.dumps({"id": LEGACY_SIMPLE_CALENDAR_ID, "version": "1.1.1"}), encoding="utf-8"
     )
 
-    with pytest.raises(WoonError, match="Link Calendar source directory"):
+    with pytest.raises(WoonError, match="link-calendar"):
         ObsidianPluginService(vault).retire([LEGACY_SIMPLE_CALENDAR_ID])
 
     assert legacy.is_dir()
@@ -1502,16 +1233,14 @@ def test_retire_legacy_simple_calendar_rejects_settings_drift_after_configuratio
     (legacy / "manifest.json").write_text(
         json.dumps({"id": LEGACY_SIMPLE_CALENDAR_ID, "version": "1.1.1"}), encoding="utf-8"
     )
-    _write_core_link_calendar_projection(vault)
     service = _install_link_calendar(vault, tmp_path)
-    service.configure_link_calendar()
     _attest_link_calendar_runtime(service)
     settings = vault / ".obsidian/plugins" / LINK_CALENDAR_ID / "data.json"
     configuration = json.loads(settings.read_text(encoding="utf-8"))
     configuration["sourceProfiles"][-1]["editable"] = True
     settings.write_text(json.dumps(configuration), encoding="utf-8")
 
-    with pytest.raises(WoonError, match="read-only source profile"):
+    with pytest.raises(WoonError, match="manual operator attestation"):
         service.retire([LEGACY_SIMPLE_CALENDAR_ID])
 
     assert legacy.is_dir()
@@ -1529,9 +1258,7 @@ def test_retire_legacy_simple_calendar_keeps_backup_after_all_guards_pass(
     (vault / ".obsidian/community-plugins.json").write_text(
         json.dumps(["homepage", LEGACY_SIMPLE_CALENDAR_ID]), encoding="utf-8"
     )
-    _write_core_link_calendar_projection(vault)
     service = _install_link_calendar(vault, tmp_path)
-    service.configure_link_calendar()
     _attest_link_calendar_runtime(service)
 
     receipt = service.retire([LEGACY_SIMPLE_CALENDAR_ID])
@@ -1559,9 +1286,7 @@ def test_retire_context_calendar_keeps_backup_after_link_calendar_is_verified(
     (vault / ".obsidian/community-plugins.json").write_text(
         json.dumps(["homepage", LEGACY_CONTEXT_CALENDAR_ID]), encoding="utf-8"
     )
-    _write_core_link_calendar_projection(vault)
     service = _install_link_calendar(vault, tmp_path)
-    service.configure_link_calendar()
     _attest_link_calendar_runtime(service)
 
     receipt = service.retire([LEGACY_CONTEXT_CALENDAR_ID])
@@ -1585,9 +1310,7 @@ def test_retire_rolls_back_plugin_and_enabled_config_when_receipt_write_fails(
     (legacy / "manifest.json").write_text(manifest, encoding="utf-8")
     enabled_path = vault / ".obsidian/community-plugins.json"
     enabled_path.write_text(json.dumps(["homepage", LEGACY_SIMPLE_CALENDAR_ID]), encoding="utf-8")
-    _write_core_link_calendar_projection(vault)
     service = _install_link_calendar(vault, tmp_path)
-    service.configure_link_calendar()
     _attest_link_calendar_runtime(service)
     enabled_before = enabled_path.read_bytes()
     atomic_write = obsidian_plugins._atomic_write
@@ -1619,9 +1342,7 @@ def test_retire_rejects_a_directory_whose_manifest_id_does_not_match(
     (legacy / "manifest.json").write_text(
         json.dumps({"id": "unrelated-plugin", "version": "1.0.0"}), encoding="utf-8"
     )
-    _write_core_link_calendar_projection(vault)
     service = _install_link_calendar(vault, tmp_path)
-    service.configure_link_calendar()
     _attest_link_calendar_runtime(service)
 
     with pytest.raises(WoonError, match="manifest is invalid"):
@@ -1630,7 +1351,7 @@ def test_retire_rejects_a_directory_whose_manifest_id_does_not_match(
     assert legacy.is_dir()
 
 
-def test_retire_full_calendar_requires_notion_bases_month_projection(tmp_path: Path) -> None:
+def test_retire_full_calendar_requires_link_calendar_runtime(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     plugin = vault / ".obsidian/plugins" / FULL_CALENDAR_REMASTERED_ID
     plugin.mkdir()
@@ -1641,11 +1362,11 @@ def test_retire_full_calendar_requires_notion_bases_month_projection(tmp_path: P
         json.dumps(["homepage", FULL_CALENDAR_REMASTERED_ID]), encoding="utf-8"
     )
 
-    with pytest.raises(WoonError, match="Notion Bases must be enabled"):
+    with pytest.raises(WoonError, match="link-calendar"):
         ObsidianPluginService(vault).retire([FULL_CALENDAR_REMASTERED_ID])
 
 
-def test_retire_full_calendar_keeps_a_local_backup_after_notion_bases_validates(
+def test_retire_full_calendar_keeps_a_local_backup_after_link_calendar_validates(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
@@ -1664,7 +1385,8 @@ def test_retire_full_calendar_keeps_a_local_backup_after_notion_bases_validates(
         json.dumps(["homepage", FULL_CALENDAR_REMASTERED_ID, NOTION_BASES_ID]),
         encoding="utf-8",
     )
-    _write_core_notion_bases_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    _attest_link_calendar_runtime(service)
 
     receipt = ObsidianPluginService(vault).retire([FULL_CALENDAR_REMASTERED_ID])
 

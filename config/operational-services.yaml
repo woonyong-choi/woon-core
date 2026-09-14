@@ -1,0 +1,40 @@
+version: 1
+# Inventory of existing services, not permission to start, stop or reconfigure them.
+# Machine-specific launchd files remain in the local environment.
+services:
+  - id: runnable-local-companion
+    owner: obsidian-plugin-runtime
+    source: repo://runnable-code
+    purpose: Explicitly started loopback-only companion for approved local execution
+    adapter: woon knowledge obsidian-plugin start-runnable-companion
+    endpoint: http://127.0.0.1:17171
+    verification: owned PID and artifact hash, authenticated capabilities, separate pairing receipt
+    persistence: detached-process-without-launchd
+    knowledge_writer: false
+  - id: runnable-code-runner
+    launchd_label: com.woonyong.runnable-code-runner
+    owner: runnable-code
+    source: repo://runnable-code
+    purpose: Isolated compiled-code runner used by approved runnable examples
+    verification: process status, health response and bounded execution receipt
+    knowledge_writer: false
+  - id: runnable-code-tunnel
+    launchd_label: com.woonyong.runnable-code-tunnel
+    owner: runnable-code
+    source: repo://runnable-code
+    purpose: Public transport to the existing runner endpoint
+    verification: process status and runner endpoint response
+    knowledge_writer: false
+  - id: herdr-harness
+    launchd_label: com.woonyong.woon-herdr-harness
+    owner: development-session-operations
+    source: repo://core
+    purpose: Restore and manage explicitly requested development panes
+    verification: harness process and session status
+    knowledge_writer: false
+  - id: local-ci-tunnel
+    launchd_label: com.local-ci-hub.cloudflare-tunnel
+    owner: local-ci-hub
+    purpose: Existing transport for local CI; independent of Second Brain
+    verification: process status and owner-managed CI health
+    knowledge_writer: false
