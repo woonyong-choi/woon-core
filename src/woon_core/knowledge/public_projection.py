@@ -37,7 +37,7 @@ _RECEIPT_RELATIVE = Path(".local/woon-knowledge/public-projection/receipt.json")
 _WIKI_ROOT = Path("wiki/Wiki")
 _PUBLIC_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _LEGACY_PUBLIC_PATH = re.compile(
-    r"/wiki/[a-z0-9]+(?:-[a-z0-9]+)*/[a-z0-9]+(?:-[a-z0-9]+)*(?:/|\.html)\Z"
+    r"/wiki/[a-z0-9]+(?:-[a-z0-9]+)*/[a-z0-9가-힣]+(?:-[a-z0-9가-힣]+)*(?:/|\.html)\Z"
 )
 _PRIVATE_ROUTE_SEGMENTS = frozenset({"private", "sources", "catalog", "personal", "local-only"})
 _WIKILINK = re.compile(
@@ -127,7 +127,8 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
     public slugs. They become separate HTML artifacts targeting that verified
     document directly; private owners and inferred aliases never create them.
     ``public_redirect_from_paths`` separately names former category/document
-    paths, ending in a slash or ``.html``; it does not relax canonical slugs.
+    paths, ending in a slash or ``.html``. Legacy document names may include
+    Hangul syllables; this does not relax namespaces or canonical slugs.
     """
 
     root = vault.expanduser().resolve()

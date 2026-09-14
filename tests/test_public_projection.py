@@ -223,6 +223,8 @@ def test_legacy_paths_preserve_both_url_forms_and_replay_without_duplicates(tmp_
     paths = [
         "/wiki/algorithm/linear-data-structures/",
         "/wiki/algorithm/linear-data-structures.html",
+        "/wiki/os/바이트-버퍼와-캐스팅-실험/",
+        "/wiki/os/바이트-버퍼와-캐스팅-실험.html",
     ]
     page["frontmatter"]["public_redirect_from_paths"] = paths
     vault, site = _write_fixture(tmp_path, [page])
@@ -232,10 +234,14 @@ def test_legacy_paths_preserve_both_url_forms_and_replay_without_duplicates(tmp_
     assert {item.relative_path.as_posix() for item in report.redirects} == {
         "legacy-paths/algorithm/linear-data-structures/index.html",
         "legacy-paths/algorithm/linear-data-structures.html",
+        "legacy-paths/os/바이트-버퍼와-캐스팅-실험/index.html",
+        "legacy-paths/os/바이트-버퍼와-캐스팅-실험.html",
     }
     for item in report.redirects:
         assert item.slug is None
         assert b"redirect_target: /wiki/data-structures/" in item.content
+        metadata = yaml.safe_load(item.content.decode().split("---", 2)[1])
+        assert metadata["permalink"] == item.public_path
     assert apply_public_projection(report).changed is True
     assert apply_public_projection(prepare_public_projection(vault, site)).changed is False
 
