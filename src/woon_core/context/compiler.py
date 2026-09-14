@@ -82,7 +82,9 @@ class Compiler:
             repositories += 1
         return CompileResult(repositories=repositories, artifacts=artifacts_count)
 
-    def check(self, all_repositories: bool, identifiers: list[str]) -> CompileResult:
+    def check(
+        self, all_repositories: bool, identifiers: list[str], *, artifacts_only: bool = False
+    ) -> CompileResult:
         repositories = 0
         artifacts_count = 0
         for identifier in self._select_ids(all_repositories, identifiers):
@@ -100,6 +102,9 @@ class Compiler:
                 if actual != expected:
                     raise WoonError(f"generated artifact drift: {path}")
                 artifacts_count += 1
+            if artifacts_only:
+                repositories += 1
+                continue
             audit_paths(
                 repository_path,
                 _string_list(manifest.get("generated_paths", []), "generated_paths"),
@@ -145,9 +150,10 @@ class Compiler:
                 "",
                 "1. `.woon/repository.yaml`을 읽고 교차 저장소 링크는 `woon resolve`로 해석한다.",
                 "2. 관련 없는 변경을 보존하고 정본 파일만 편집한다.",
-                "3. `required_checks`에 선언된 검증을 실행한다.",
+                "3. `required_checks` 중 변경 영향·위험에 맞는 검증을 선택하고 "
+                "같은 입력·환경의 통과 근거는 재사용한다.",
                 "4. 생성 파일을 직접 편집하지 않고 정본에서 다시 생성한다.",
-                "5. 검증을 통과하기 전에는 완료로 보고하지 않는다.",
+                "5. 필요한 검증을 통과한 범위만 완료로 보고하고 미확인 결과를 구분한다.",
             ]
             for rule_identifier, rules in policies:
                 lines.extend(("", f"## 정책: {rule_identifier}"))
@@ -183,7 +189,7 @@ class Compiler:
             [
                 identifier
                 for identifier, repository in self.registry.repositories.items()
-                if not repository.output
+                if not repository.output and repository.context_managed
             ]
             if all_repositories
             else identifiers

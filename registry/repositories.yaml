@@ -16,10 +16,35 @@ repositories:
     remote: https://github.com/woonyong-kr/woon-knowledge.git
     directory: woon-knowledge
     role: knowledge
-  site:
-    remote: https://github.com/woonyong-kr/woon-site.git
-    directory: woon-site
-    role: publishing-source
+  obsidian-theme:
+    context_managed: false
+    local_only: true
+    directory: woon-obsidian-theme
+    role: obsidian-theme-source
+  link-calendar:
+    context_managed: false
+    remote: https://github.com/woonyong-choi/manta-calendar.git
+    base: workspace-parent
+    directory: OSS/obsidian/manta-calendar
+    role: obsidian-plugin-source
+  linked-graph:
+    context_managed: false
+    remote: https://github.com/woonyong-choi/manta-graph.git
+    base: workspace-parent
+    directory: OSS/obsidian/manta-graph
+    role: obsidian-plugin-source
+  runnable-code:
+    context_managed: false
+    remote: https://github.com/woonyong-choi/manta-code-blocks.git
+    base: workspace-parent
+    directory: OSS/obsidian/manta-code-blocks
+    role: obsidian-plugin-source
+  manta:
+    context_managed: false
+    remote: https://github.com/woonyong-choi/manta.git
+    base: workspace-parent
+    directory: OSS/obsidian/manta
+    role: obsidian-plugin-source
   profile-output:
     remote: https://github.com/woonyong-kr/woonyong-kr.git
     directory: woonyong-kr

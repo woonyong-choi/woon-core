@@ -10,7 +10,7 @@ rules:
   - "`.github` 같은 도구 고정 경로와 `__pycache__` 같은 runtime 경로는 이름 검사에서 제외한다."
   - GitHub Pages의 `owner.github.io`처럼 외부 서비스가 강제하는 output 저장소 이름은 예외로 기록하고 내부 폴더만 검사한다.
   - 정본은 역할이 드러나는 domain 폴더에 두고 생성물은 생성 전용 경로에 둔다.
-  - Python 실행 코드는 src 하위의 도메인 package, 테스트는 tests, 사람이 편집하는 입력은 역할별 폴더, 검증 규격은 schema, 지속 문서는 docs에 둔다.
+  - 실행 코드는 src, 필요한 자동 검증은 tests, 지속 문서는 docs, 보조 명령은 scripts, 제품 자산은 assets, 선언 설정은 config에 역할별로 둔다. 언어·framework가 강제하는 구조를 우선하며 실제로 쓰지 않는 폴더는 만들지 않는다. Python package는 src 하위 도메인으로 나누고 사람이 편집하는 원자료와 생성물을 같은 폴더의 정본으로 혼용하지 않는다.
   - 머신별 값은 Git에서 제외된 local overlay에만 두고 기본값으로 커밋하지 않는다.
   - 대체된 파일은 참조, 실행 경로, fixture와 rollback 필요성을 확인한 뒤 제거한다.
   - 빈 placeholder 폴더와 필요가 입증되지 않은 추상화 계층을 만들지 않는다.

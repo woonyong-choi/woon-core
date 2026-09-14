@@ -53,6 +53,10 @@ def test_generate_then_check_is_deterministic(tmp_path: Path) -> None:
     assert (target / "AGENTS.md").read_bytes() == before
     assert compiler.check(False, ["target"]).artifacts == 3
     assert not (target / ".cursor").exists()
+    write(target / "input.yaml", f"path: {MAC_USER_HOME}\n")
+    assert compiler.check(False, ["target"], artifacts_only=True).artifacts == 3
+    with pytest.raises(WoonError, match="absolute user paths"):
+        compiler.check(False, ["target"])
 
 
 def test_generate_refuses_unmanaged_instruction(tmp_path: Path) -> None:
