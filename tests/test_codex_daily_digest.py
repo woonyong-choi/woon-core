@@ -52,7 +52,7 @@ def test_records_transcript_free_daily_digest_once(tmp_path: Path) -> None:
     assert path.is_file()
     assert "원문 대신 결정과 다음 행동만" in path.read_text(encoding="utf-8")
     assert first.relative_path == "inbox/daily/2026-08-17.md"
-    assert "## 정본 변경" in path.read_text(encoding="utf-8")
+    assert "## 정본 변경" not in path.read_text(encoding="utf-8")
     assert "## 대화 찾아보기" not in path.read_text(encoding="utf-8")
     assert "[[../../wiki/personal/herdr|일일 대화 요약 자동화 추가]]" in path.read_text(
         encoding="utf-8"
@@ -125,52 +125,37 @@ def test_clean_run_does_not_create_a_missing_daily_note(tmp_path: Path) -> None:
     assert not (tmp_path / "inbox/daily/2026-08-17.md").exists()
 
 
-@pytest.mark.parametrize(
-    ("input_state", "expected_title"),
-    [
-        ("partial", "현재까지 정리됨"),
-        ("pending", "다음 실행 대기"),
-        ("unavailable", "세션 원본을 찾지 못해 대기"),
-        ("source-only", "정본 반영 필요"),
-    ],
-)
-def test_empty_daily_digest_explains_its_honest_input_state(
-    tmp_path: Path, input_state: str, expected_title: str
+@pytest.mark.parametrize("input_state", ["partial", "pending", "unavailable", "source-only"])
+def test_empty_or_missing_digest_preserves_note_and_checkpoint(
+    tmp_path: Path,
+    input_state: str,
 ) -> None:
-    _digest_settings(tmp_path)
-    (tmp_path / "inbox/daily").mkdir(parents=True)
-    (tmp_path / "inbox/daily/2026-08-17.md").write_text("# 2026-08-17\n", encoding="utf-8")
-
-    if input_state == "source-only":
-        record_codex_source_bundle(
-            tmp_path,
-            CodexSourceBundle(
+    settings = _digest_settings(tmp_path)
+    checkpoint_before = settings.checkpoint_path.read_bytes()
+    note = tmp_path / "inbox/daily/2026-08-17.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# 2026-08-17\n\n- [x] 사용자 완료 기록\n")
+    before = note.read_bytes()
+    for _ in range(2):
+        with pytest.raises(WoonError, match="pending state"):
+            record_codex_daily_digest(
+                tmp_path,
                 day=date(2026, 8, 17),
-                source_locator="thread-fixture:2026-08-17",
-                title="보존된 대화",
-                messages=(
-                    CodexSourceMessage(
-                        role="assistant",
-                        text="최종 답변",
-                        created_at="2026-08-17T03:11:00Z",
-                    ),
-                ),
-            ),
+                entries=(),
+                input_state=input_state,
+            )
+    assert note.read_bytes() == before
+    assert settings.checkpoint_path.read_bytes() == checkpoint_before
+    assert not (settings.receipt_directory / "daily-record-materialization").exists()
+    # An absent day also remains absent after the same failed input is retried.
+    with pytest.raises(WoonError, match="pending state"):
+        record_codex_daily_digest(
+            tmp_path,
+            day=date(2026, 8, 18),
+            entries=(),
+            input_state=input_state,
         )
-
-    record_codex_daily_digest(
-        tmp_path,
-        day=date(2026, 8, 17),
-        entries=(),
-        input_state=input_state,
-    )
-
-    rendered = (tmp_path / "inbox/daily/2026-08-17.md").read_text(encoding="utf-8")
-    assert "> [!info]" not in rendered
-    assert f"**{expected_title}** —" in rendered
-    assert expected_title in rendered
-    assert "## 정본 변경" not in rendered
-    assert "## 대화 찾아보기" not in rendered
+    assert not (tmp_path / "inbox/daily/2026-08-18.md").exists()
 
 
 def test_nonempty_daily_digest_marks_completion_before_rendering_entries(tmp_path: Path) -> None:
@@ -195,7 +180,7 @@ def test_nonempty_daily_digest_marks_completion_before_rendering_entries(tmp_pat
     )
 
     rendered = (tmp_path / "inbox/daily/2026-08-17.md").read_text(encoding="utf-8")
-    assert "**정본 반영 완료** —" in rendered
+    assert "**정본 반영 완료** —" not in rendered
 
 
 def test_partial_daily_digest_renders_items_without_claiming_day_complete(tmp_path: Path) -> None:
@@ -221,10 +206,10 @@ def test_partial_daily_digest_renders_items_without_claiming_day_complete(tmp_pa
     )
 
     rendered = (tmp_path / "inbox/daily/2026-08-24.md").read_text(encoding="utf-8")
-    assert "**현재까지 정리됨** —" in rendered
+    assert "**현재까지 정리됨** —" not in rendered
     assert "완료된 대화부터 누적한다" in rendered
     assert "**정본 반영 완료** —" not in rendered
-    assert "## 정본 변경" in rendered
+    assert "## 정본 변경" not in rendered
 
 
 def test_daily_digest_coalesces_incremental_updates_for_the_same_subject(tmp_path: Path) -> None:
@@ -383,7 +368,7 @@ def test_daily_digest_renders_detailed_semantics_without_source_index(
     assert "실제 착용감 · 원하는 실루엣" not in rendered
     assert "## 대화 찾아보기" not in rendered
     assert "> [!note]" not in rendered
-    assert "### [[../../wiki/personal/denim-fit|데님 핏을 실제 착용 기준으로 비교했다]]" in rendered
+    assert "## [[../../wiki/personal/denim-fit|데님 핏을 실제 착용 기준으로 비교했다]]" in rendered
     assert "질문 1개" not in rendered
     assert "**12:10**" not in rendered
     assert "기존에 편하게 입은 바지와 비교하면" not in rendered
@@ -422,17 +407,16 @@ def test_source_only_daily_digest_does_not_infer_canonical_links_from_chat(
         ),
     )
 
-    record_codex_daily_digest(
-        tmp_path,
-        day=date(2026, 8, 24),
-        entries=(),
-        input_state="source-only",
-    )
-
-    rendered = daily.read_text(encoding="utf-8")
-    assert "## 관련 문서" not in rendered
-    assert "[[../../wiki/personal/link-calendar" not in rendered
-    assert "**정본 반영 필요** —" in rendered
+    before = daily.read_bytes()
+    with pytest.raises(WoonError, match="pending state"):
+        record_codex_daily_digest(
+            tmp_path,
+            day=date(2026, 8, 24),
+            entries=(),
+            input_state="source-only",
+        )
+    assert daily.read_bytes() == before
+    assert "[[../../wiki/personal/link-calendar" not in daily.read_text()
 
 
 def test_processed_one_off_entries_stay_in_evidence_without_becoming_a_promotion_queue(
@@ -497,7 +481,7 @@ def test_daily_digest_places_canonical_links_with_their_subject(tmp_path: Path) 
     )
 
     rendered = daily.read_text(encoding="utf-8")
-    assert "### [[../../wiki/personal/link-calendar|Link Calendar 사용 원칙]]" in rendered
+    assert "## [[../../wiki/personal/link-calendar|Link Calendar 사용 원칙]]" in rendered
     assert "**변경 문서**\n- [[../../wiki/personal/wiki|Wiki]]" in rendered
     assert "## 관련 문서" not in rendered
     assert rendered.count("[[../../wiki/personal/link-calendar") == 1
@@ -545,7 +529,7 @@ def test_daily_digest_groups_project_children_under_one_canonical_root(tmp_path:
     )
 
     rendered = daily.read_text(encoding="utf-8")
-    assert rendered.count("### [[../../wiki/personal/project|프로젝트]]") == 1
+    assert rendered.count("## [[../../wiki/personal/project|프로젝트]]") == 1
     assert "프로젝트의 현재 목표다." in rendered
     assert "[[../../wiki/personal/architecture|아키텍처]]" not in rendered
     assert "[[../../wiki/personal/verification|검증]]" not in rendered
@@ -586,7 +570,7 @@ def test_daily_digest_populates_native_base_metadata(tmp_path: Path) -> None:
 
     rendered = daily.read_text(encoding="utf-8")
     assert 'summary: "AICE 학습 환경을 준비했다"' in rendered
-    assert 'digest_status: "정본 반영 완료"' in rendered
+    assert "digest_status:" not in rendered
     assert '  - "학습"' in rendered
     assert '  - "AICE"' in rendered
 
@@ -628,8 +612,8 @@ def test_daily_digest_removes_only_retired_empty_sections_and_keeps_manual_text(
     assert "## Woon 처리 안내" not in rendered
     assert "## 포착" in rendered
     assert "내가 직접 적은 메모" in rendered
-    assert "<!-- woon-tasks:start -->" in rendered
-    assert rendered.endswith("## 자유 메모\n")
+    assert "<!-- woon-tasks:start -->" not in rendered
+    assert "## 자유 메모" not in rendered
 
 
 def test_migrates_only_generated_legacy_digests_into_the_daily_record(tmp_path: Path) -> None:
@@ -680,7 +664,7 @@ def _digest_settings(vault: Path):
       rrule: FREQ=DAILY;BYHOUR=23;BYMINUTE=55;BYSECOND=0
       notification_policy: failed_runs_only
       prompt_sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-      owned_paths: [inbox/daily, inbox/calendar, brain/review/activity]
+      owned_paths: [inbox/daily, brain/review/activity]
 """
     runnable = original.replace(
         """mode: proposal-only

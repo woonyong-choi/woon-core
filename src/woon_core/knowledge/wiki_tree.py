@@ -16,6 +16,7 @@ from dataclasses import field as dataclass_field
 from datetime import date
 from pathlib import Path
 from typing import Any
+from unicodedata import normalize
 from urllib.parse import unquote
 
 import yaml
@@ -32,16 +33,18 @@ CHILDREN_START = "<!-- woon-wiki-children:start -->"
 CHILDREN_END = "<!-- woon-wiki-children:end -->"
 PARENT_START = "<!-- woon-wiki-local-parent:start -->"
 PARENT_END = "<!-- woon-wiki-local-parent:end -->"
-BOOK_READER_FOOTER_START = "<!-- woon-book-reader-footer:start -->"
-BOOK_READER_FOOTER_END = "<!-- woon-book-reader-footer:end -->"
 BOOK_READER_NAVIGATION_START = "<!-- woon-book-reader-navigation:start -->"
 BOOK_READER_NAVIGATION_END = "<!-- woon-book-reader-navigation:end -->"
+BOOK_READER_FOOTER_START = "<!-- woon-book-reader-footer:start -->"
+BOOK_READER_FOOTER_END = "<!-- woon-book-reader-footer:end -->"
 LATEST_START = "<!-- woon-wiki-latest:start -->"
 LATEST_END = "<!-- woon-wiki-latest:end -->"
 TIMELINE_START = "<!-- woon-wiki-timeline:start -->"
 TIMELINE_END = "<!-- woon-wiki-timeline:end -->"
 SOURCE_INDEX_START = "<!-- woon-wiki-source-index:start -->"
 SOURCE_INDEX_END = "<!-- woon-wiki-source-index:end -->"
+PERSON_HISTORY_START = "<!-- woon-person-history:start -->"
+PERSON_HISTORY_END = "<!-- woon-person-history:end -->"
 
 NODE_KINDS = {"root", "hub", "topic", "entity", "detail", "decision"}
 VIEW_MODES = {"tree", "linear", "project", "topic-timeline", "article"}
@@ -276,9 +279,10 @@ class WikiTreeNode:
     occurred_on: date | None
     include_in_latest: bool
     reader_navigation: str
-
+    navigation_order: str = ""
     reader_leaf_navigation: bool = False
     reader_completion: str = ""
+    event_period: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,6 +427,21 @@ def prepare_wiki_tree_refresh(
     return WikiTreeReport(len(nodes), changed, pages, (), expected, previous)
 
 
+def validate_wiki_tree_inputs(vault: Path, expected_inputs: Mapping[Path, bytes | None]) -> None:
+    """Reject changed input bytes or page membership without repeating tree validation."""
+
+    if not expected_inputs:
+        return
+    root = vault.expanduser().resolve()
+    expected_paths = {p for p, value in expected_inputs.items() if value is not None}
+    if set(iter_wiki_pages(root / "wiki")) != expected_paths:
+        raise WoonError("Wiki tree paths changed after preparation; replan")
+    for path, expected in expected_inputs.items():
+        actual = path.read_bytes() if path.is_file() else None
+        if path.is_symlink() or actual != expected:
+            raise WoonError("Wiki tree input changed after preparation; replan")
+
+
 def apply_wiki_tree_refresh(vault: Path, report: WikiTreeReport) -> None:
     """Apply one validated tree projection atomically with full rollback."""
 
@@ -455,23 +474,14 @@ def load_wiki_tree(
     *,
     page_texts: Mapping[str, str] | None = None,
 ) -> tuple[tuple[WikiTreeNode, ...], dict[str, str], tuple[str, ...]]:
-    """Load and validate the active Wiki parent graph without mutating files."""
+    """Validate the active graph or a complete in-memory proposed output snapshot."""
 
     root = vault.expanduser().resolve()
     wiki_root = root / "wiki"
     if not wiki_root.is_dir():
         raise WoonError("Wiki root is missing")
     nodes: list[WikiTreeNode] = []
-    texts: dict[str, str] = {}
-    issues: list[str] = []
-    canonical: dict[str, str] = {}
-    identities: dict[tuple[str, str], str] = {}
-    book_roots = _book_root_ids(
-        page_texts.values()
-        if page_texts is not None
-        else (path.read_text(encoding="utf-8") for path in iter_wiki_pages(wiki_root))
-    )
-    available = (
+    texts = (
         dict(page_texts)
         if page_texts is not None
         else {
@@ -479,9 +489,12 @@ def load_wiki_tree(
             for path in iter_wiki_pages(wiki_root)
         }
     )
-    for relative, text in sorted(available.items()):
+    issues: list[str] = []
+    canonical: dict[str, str] = {}
+    identities: dict[tuple[str, str], str] = {}
+    book_roots = _book_root_ids(texts.values())
+    for relative, text in sorted(texts.items()):
         path = root / relative
-        texts[relative] = text
         try:
             metadata, _ = split_markdown(text)
         except WoonError as error:
@@ -495,6 +508,9 @@ def load_wiki_tree(
         ).casefold()
         reader_navigation = _optional_text(
             metadata.get("reader_navigation"), "reader_navigation", relative, issues
+        ).casefold()
+        navigation_order = _optional_text(
+            metadata.get("navigation_order"), "navigation_order", relative, issues
         ).casefold()
         node_kind = _required_text(metadata, "node_kind", relative, issues)
         view_mode = _required_text(metadata, "view_mode", relative, issues)
@@ -541,6 +557,11 @@ def load_wiki_tree(
         started_on = _optional_date(metadata.get("started_on"), "started_on", relative, issues)
         ended_on = _optional_date(metadata.get("ended_on"), "ended_on", relative, issues)
         occurred_on = _optional_date(metadata.get("occurred_on"), "occurred_on", relative, issues)
+        event_period = _optional_text(
+            metadata.get("event_period"), "event_period", relative, issues
+        )
+        if "\n" in event_period or "\r" in event_period:
+            issues.append(f"{relative}: event_period must be a single-line description")
         include_in_latest = metadata.get("include_in_latest", True)
         if not isinstance(include_in_latest, bool):
             issues.append(f"{relative}: include_in_latest must be a boolean")
@@ -565,6 +586,8 @@ def load_wiki_tree(
             issues.append(
                 f"{relative}: reader_completion requires incomplete or complete on a book root"
             )
+        if navigation_order not in {"", "title"}:
+            issues.append(f"{relative}: navigation_order must be title when present")
         issues.extend(
             _temporal_issues(
                 relative,
@@ -627,7 +650,9 @@ def load_wiki_tree(
                 include_in_latest=include_in_latest,
                 reader_navigation=reader_navigation,
                 reader_leaf_navigation=reader_leaf_navigation,
+                navigation_order=navigation_order,
                 reader_completion=reader_completion,
+                event_period=event_period,
             )
         )
     by_path = {node.relative_path: node for node in nodes}
@@ -708,7 +733,11 @@ def render_wiki_tree_view(
     show_tree = (
         (book_map_kind is not None or node.node_kind in TREE_VIEW_KINDS)
         and (bool(descendants) or bool(node.ordered_reader_sections))
-        and not (book_map_kind is None and node.node_kind == "entity" and direct_already_authored)
+        and not (
+            book_map_kind is None
+            and (node.node_kind == "entity" or node.reader_navigation == "inline")
+            and direct_already_authored
+        )
         and node.reader_navigation != "sidebar-only"
     )
     if show_tree:
@@ -735,24 +764,17 @@ def render_wiki_tree_view(
             ),
             CHILDREN_END,
         ]
-        if keyword_heading_map:
-            updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
-            updated = _replace_or_insert_after_h1(
-                updated, CHILDREN_START, CHILDREN_END, "\n".join(child_rows)
-            )
-        else:
-            updated = _replace_or_append_section(
-                updated,
-                "하위 키워드",
-                CHILDREN_START,
-                CHILDREN_END,
-                "\n".join(child_rows),
-            )
+        # Semantic topic headings belong to the rows. A generic wrapper adds
+        # no navigation meaning, including on the default (ungrouped) map.
+        updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
+        updated = _replace_or_insert_after_h1(
+            updated, CHILDREN_START, CHILDREN_END, "\n".join(child_rows)
+        )
         if (
             node.node_kind in {"root", "hub"}
             or book_map_kind is not None
             or is_book_scoped_canonical_id(node.canonical_id)
-            or node.entity_kind in {"book", "project"}
+            or node.entity_kind in {"book", "project", "person", "fictional-character"}
         ):
             updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
         else:
@@ -797,7 +819,7 @@ def render_wiki_tree_view(
                 updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
     elif (
         node.node_kind == "entity"
-        and node.entity_kind not in {"book", "project"}
+        and node.entity_kind not in {"book", "project", "person", "fictional-character"}
         and related
         and any(
             item.include_in_latest and not _contains_wikilink_to(authored, item.relative_path)
@@ -831,6 +853,7 @@ def render_wiki_tree_view(
         updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
         updated = _strip_section(updated, "최신 관련 문서", LATEST_START, LATEST_END)
     updated = _render_planned_parent_link(updated, node, nodes, texts)
+    updated = _render_person_history(updated, texts)
     if book_footer is not None:
         updated = updated.rstrip() + "\n\n" + book_footer + "\n"
     return _normalize_h1_spacing(updated).rstrip() + "\n"
@@ -895,6 +918,143 @@ def _render_planned_parent_link(
     return _replace_or_insert_after_h1(text, PARENT_START, PARENT_END, block)
 
 
+def _book_leaf_footers(
+    nodes: tuple[WikiTreeNode, ...],
+    texts: dict[str, str],
+    children: dict[str, tuple[WikiTreeNode, ...]],
+    selected_paths: frozenset[str],
+) -> dict[str, str]:
+    """Project a book's explicit TOC order onto its actual content leaves once."""
+
+    result: dict[str, str] = {}
+    by_id = {node.canonical_id: node for node in nodes}
+    by_path = {node.relative_path: node for node in nodes}
+    selected_books: set[str] = set()
+    for path in selected_paths:
+        current = by_path[path]
+        ancestors: set[str] = set()
+        while current.relative_path not in ancestors:
+            ancestors.add(current.relative_path)
+            if current.entity_kind == "book":
+                selected_books.add(current.relative_path)
+                break
+            if current.parent_path not in by_path:
+                break
+            current = by_path[current.parent_path]
+    for book in nodes:
+        if not book.reader_leaf_navigation or book.relative_path not in selected_books:
+            continue
+        leaves: list[WikiTreeNode] = []
+        seen: set[str] = set()
+
+        def visit(
+            node: WikiTreeNode, ordered_leaves: list[WikiTreeNode], visited: set[str]
+        ) -> None:
+            if node.canonical_id in visited:
+                raise WoonError("book leaf navigation must visit every page once")
+            visited.add(node.canonical_id)
+            direct = children.get(node.relative_path, ())
+            if not direct:
+                metadata, _ = split_markdown(texts[node.relative_path])
+                if (
+                    node.node_kind == "detail"
+                    and metadata.get("content_state") != "toc-only"
+                    and _has_direct_reader_content(texts[node.relative_path])
+                ):
+                    ordered_leaves.append(node)
+                return
+            if node.navigation_groups:
+                ids = [item for group in node.navigation_groups for item in group.child_ids]
+                if len(ids) != len(set(ids)) or set(ids) != {
+                    child.canonical_id for child in direct
+                }:
+                    raise WoonError("book leaf navigation requires complete explicit child order")
+                ordered = tuple(by_id[item] for item in ids)
+            else:
+                ordered = sort_wiki_children(node, direct)
+            for child in ordered:
+                if child.entity_kind != "book":
+                    visit(child, ordered_leaves, visited)
+
+        visit(book, leaves, seen)
+        for index, leaf in enumerate(leaves):
+            links: list[str] = []
+            if index:
+                previous = leaves[index - 1]
+                links.append(f"[[{previous.relative_path.removesuffix('.md')}|← {previous.title}]]")
+            links.append(f"[[{book.relative_path.removesuffix('.md')}|책 목차]]")
+            if index + 1 < len(leaves):
+                following = leaves[index + 1]
+                links.append(
+                    f"[[{following.relative_path.removesuffix('.md')}|{following.title} →]]"
+                )
+            result[leaf.relative_path] = (
+                BOOK_READER_FOOTER_START + "\n" + " · ".join(links) + "\n" + BOOK_READER_FOOTER_END
+            )
+    return result
+
+
+def _render_person_history(text: str, texts: dict[str, str]) -> str:
+    """Project explicitly assigned events without inferring people or occurrence dates."""
+
+    metadata, _ = split_markdown(text)
+    person_id = metadata.get("history_person_id")
+    if person_id is None:
+        return text
+    if (
+        not isinstance(person_id, str)
+        or not person_id.strip()
+        or metadata.get("publish") is not False
+        or metadata.get("access") != "local-only"
+    ):
+        raise WoonError("person history requires an explicit ID and private/local-only page")
+    events: list[tuple[float, str, dict[str, Any]]] = []
+    identities: set[str] = set()
+    for relative, source in texts.items():
+        if "event_people:" not in source:
+            continue
+        event, _ = split_markdown(source)
+        people = event.get("event_people", [])
+        if not isinstance(people, list) or not all(isinstance(item, str) for item in people):
+            raise WoonError(f"{relative}: event_people must contain confirmed person IDs")
+        if person_id not in people:
+            continue
+        identity = event.get("canonical_id")
+        period = event.get("event_period")
+        order = event.get("sequence")
+        if (
+            event.get("publish") is not False
+            or event.get("access") != "local-only"
+            or not isinstance(identity, str)
+            or not isinstance(period, (str, date))
+            or not str(period).strip()
+            or not isinstance(order, (int, float))
+            or isinstance(order, bool)
+        ):
+            raise WoonError(f"{relative}: event requires private scope, period and explicit order")
+        if identity in identities:
+            raise WoonError(f"{relative}: duplicate event identity in person history")
+        identities.add(identity)
+        events.append((float(order), relative, event))
+
+    def cell(value: object) -> str:
+        return str(value or "").replace("\n", " ").replace("|", "&#124;").strip()
+
+    rows = ["| 발생 시기 | 사건 | 변화·해석 | 상세 기록 |", "|---|---|---|---|"]
+    for _, relative, event in sorted(events, key=lambda item: (item[0], item[1])):
+        target = relative.removesuffix(".md")
+        rows.append(
+            f"| {cell(event['event_period'])} | {cell(event.get('title'))} "
+            f"| {cell(event.get('event_change', '아직 정리되지 않음'))} "
+            f"| [[{target}\\|사건과 근거]] |"
+        )
+    body = "\n".join(rows) if events else "확인된 사건 연결이 아직 없습니다."
+    block = f"{PERSON_HISTORY_START}\n{body}\n{PERSON_HISTORY_END}"
+    return _replace_or_append_section(
+        text, "사건 연표", PERSON_HISTORY_START, PERSON_HISTORY_END, block
+    )
+
+
 def strip_generated_wiki_views(text: str) -> str:
     """Remove derived view blocks before computing a compiler projection."""
 
@@ -904,6 +1064,7 @@ def strip_generated_wiki_views(text: str) -> str:
     updated = _strip_section(updated, "원자료", SOURCE_INDEX_START, SOURCE_INDEX_END)
     updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
     updated = _strip_section(updated, "최신 관련 문서", LATEST_START, LATEST_END)
+    updated = _strip_section(updated, "사건 연표", PERSON_HISTORY_START, PERSON_HISTORY_END)
     return _strip_marker_block(updated, OVERVIEW_START, OVERVIEW_END).rstrip() + "\n"
 
 
@@ -920,13 +1081,8 @@ def preserve_generated_wiki_views(existing: str, rendered: str) -> str:
     for heading, start, end in (("하위 키워드", CHILDREN_START, CHILDREN_END),):
         block = _optional_marker_block(existing, start, end)
         if block is not None:
-            if _managed_navigation_uses_h2(block) or _managed_navigation_follows_h1(
-                existing, block
-            ):
-                updated = _strip_section(updated, heading, start, end)
-                updated = _replace_or_insert_after_h1(updated, start, end, block)
-            else:
-                updated = _replace_or_append_section(updated, heading, start, end, block)
+            updated = _strip_section(updated, heading, start, end)
+            updated = _replace_or_insert_after_h1(updated, start, end, block)
     parent_link = _optional_marker_block(existing, PARENT_START, PARENT_END)
     if parent_link is not None:
         existing_metadata, _ = split_markdown(existing)
@@ -955,6 +1111,11 @@ def preserve_generated_wiki_views(existing: str, rendered: str) -> str:
         heading = "최신 관련 문서" if "## 최신 관련 문서" in existing else "최신 하위 문서"
         updated = _replace_or_append_section(updated, heading, LATEST_START, LATEST_END, latest)
         updated = _normalize_latest_heading(updated, heading)
+    history = _optional_marker_block(existing, PERSON_HISTORY_START, PERSON_HISTORY_END)
+    if history is not None:
+        updated = _replace_or_append_section(
+            updated, "사건 연표", PERSON_HISTORY_START, PERSON_HISTORY_END, history
+        )
     updated = _preserve_ordered_book_navigation(existing, updated)
     footer = _optional_marker_block(existing, BOOK_READER_FOOTER_START, BOOK_READER_FOOTER_END)
     if footer is not None:
@@ -1012,7 +1173,7 @@ def parent_link(relative_path: str, title: str) -> str:
 
 
 def normalize_identity(value: str) -> str:
-    # Symbols distinguish language identities such as C, C++ and C#.
+    # '+' and '#' are meaningful in language names such as C++ and C#.
     return re.sub(r"[^0-9a-z가-힣+#]+", "", value.casefold())
 
 
@@ -1168,8 +1329,8 @@ def _temporal_issues(
         issues.append(f"{relative}: occurred_on cannot be combined with a date range")
     if started_on is not None and ended_on is not None and ended_on < started_on:
         issues.append(f"{relative}: ended_on cannot precede started_on")
-    if lifecycle_status in {"completed", "cancelled", "archived"} and not (ended_on or occurred_on):
-        issues.append(f"{relative}: closed lifecycle requires ended_on or occurred_on")
+    # A confirmed closed state need not have a known calendar date. Never
+    # substitute the observation/update date for the actual ending date.
     if lifecycle_status in {"idea", "planned", "active", "paused"} and ended_on is not None:
         issues.append(f"{relative}: open lifecycle cannot have ended_on")
     return issues
@@ -1221,7 +1382,12 @@ def _domain_tree_issues(
             )
         resources_path = None
         people_path = _direct_child_path_by_title(children, root, "인물")
-        issues.extend(_public_hub_vocabulary_issues(children))
+        boundary_metadata, _ = split_markdown(texts[PUBLIC_WIKI_HUB_PATH])
+        contract = boundary_metadata.get("public_taxonomy")
+        if contract is None:
+            issues.extend(_public_hub_vocabulary_issues(children))
+        else:
+            issues.extend(_declared_public_taxonomy_issues(children, contract))
 
     books = by_path.get(books_path) if books_path is not None else None
     if books is not None:
@@ -1432,6 +1598,35 @@ def _public_hub_vocabulary_issues(
     return issues
 
 
+def _declared_public_taxonomy_issues(
+    children: dict[str, tuple[WikiTreeNode, ...]], contract: object
+) -> list[str]:
+    """Validate a Vault-owned taxonomy without maintaining another outline in code."""
+    if not isinstance(contract, dict) or contract.get("version") != 1:
+        return ["public Wiki taxonomy requires version 1"]
+    roots = contract.get("roots")
+    if not isinstance(roots, list) or not all(isinstance(item, str) for item in roots):
+        return ["public Wiki taxonomy requires an ordered roots list"]
+    if not roots or len(set(roots)) != len(roots):
+        return ["public Wiki taxonomy roots must be nonempty and unique"]
+    actual = children.get(PUBLIC_WIKI_HUB_PATH, ())
+    titles = [node.title for node in actual if node.title != "Home"]
+    issues = []
+    if set(titles) != set(roots):
+        issues.append("public Wiki taxonomy roots do not match the declared contract")
+    for node in actual:
+        if node.canonical_id == "Wiki/projects":
+            projects = children.get(node.relative_path, ())
+            expected = contract.get("projects")
+            if not isinstance(expected, list) or [item.title for item in projects] != expected:
+                issues.append("public Wiki project children do not match the declared contract")
+            if any(
+                item.node_kind != "entity" or item.entity_kind != "project" for item in projects
+            ):
+                issues.append("public Wiki projects must contain project entities")
+    return issues
+
+
 def _ordered_reader_section_issues(
     node: WikiTreeNode,
     text: str,
@@ -1515,8 +1710,8 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
 
     A few compact catalog roots intentionally render a two-level bullet tree from
     their canonical parent relations. Every other multi-child page must name the
-    reading axis explicitly so the human view and AI context cannot degrade into
-    an alphabetic or creation-order link dump.
+    reading axis explicitly. The people hub can instead declare a title index;
+    its actual person names own the order in both human views and AI context.
     """
 
     children = _children_by_parent(tuple(nodes))
@@ -1526,7 +1721,26 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
         direct = children.get(parent.relative_path, ())
         book_map_kind = _book_navigation_kind(parent, all_nodes)
         supports_groups = parent.node_kind in TREE_VIEW_KINDS
-        if len(direct) > 1 and not parent.navigation_groups:
+        title_order = _uses_people_title_order(parent)
+        if parent.navigation_order == "title":
+            if not title_order:
+                issues.append(
+                    f"{parent.relative_path}: navigation_order title is allowed only on "
+                    "the root-direct people hub (canonical_id people/README or title '인물')"
+                )
+            if parent.navigation_groups:
+                issues.append(
+                    f"{parent.relative_path}: navigation_order title cannot be combined "
+                    "with navigation_groups"
+                )
+            if title_order:
+                for person in direct:
+                    if person.node_kind != "entity" or person.entity_kind != "person":
+                        issues.append(
+                            f"{person.relative_path}: direct children of people must be "
+                            "person entities"
+                        )
+        if len(direct) > 1 and not parent.navigation_groups and not title_order:
             missing_sequence = tuple(child for child in direct if child.sequence is None)
             if missing_sequence:
                 issues.append(
@@ -1547,6 +1761,7 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
             and len(direct) > 1
             and parent.relative_path not in UNGROUPED_NAVIGATION_EXCEPTIONS
             and parent.reader_navigation != "sidebar-only"
+            and not title_order
         ) or (book_map_kind is not None and bool(direct))
         if requires_groups and not parent.navigation_groups:
             if book_map_kind is not None:
@@ -1669,6 +1884,68 @@ def _has_direct_reader_content(text: str) -> bool:
     authored = re.sub(r"(?m)^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", authored)
     semantic = re.sub(r"[^0-9A-Za-z가-힣]+", "", authored)
     return len(semantic) >= 20
+
+
+def private_reader_target(
+    vault: Path, page_path: Path, metadata: dict[str, Any], body: str
+) -> Path | None:
+    """Validate a private pointer or book TOC; return its first verified target.
+
+    TOCs contain chapter/section headings and Markdown links, not reader prose.
+    All targets must be real private files. This does not prove book coverage.
+    """
+    if (
+        metadata.get("access") not in {"local-only", "private"}
+        or metadata.get("publish") is not False
+    ):
+        return None
+    pattern = r"\[[^\]\n]+\]\((<[^<>\n]+>|[^()\n]+)\)"
+    single = re.fullmatch(pattern, body.strip())
+    links = [single.group(1)] if single is not None else []
+    if single is None:
+        if metadata.get("entity_kind") != "book":
+            return None
+        for line in body.splitlines():
+            if not line.strip():
+                continue
+            linked_heading = re.fullmatch(r"#{2,3} " + pattern, line)
+            if linked_heading is not None:
+                links.append(linked_heading.group(1))
+                continue
+            if re.fullmatch(r"#{2,3} [^#\[\]\n]+", line):
+                continue
+            link = re.fullmatch(r"\s*- " + pattern, line)
+            if link is None:
+                return None
+            links.append(link.group(1))
+    targets = []
+    for raw in links:
+        location = unquote(raw[1:-1] if raw.startswith("<") else raw)
+        location, separator, heading = location.partition("#")
+        relative = Path(location)
+        candidate = page_path.parent / relative
+        if (
+            any(character in location for character in ("#", "?", "\\", "\0"))
+            or relative.is_absolute()
+            or candidate.is_symlink()
+            or any(parent.is_symlink() for parent in candidate.parents)
+        ):
+            raise WoonError("TOC reader link must target an existing private Vault Markdown file")
+        target = candidate.resolve()
+        if (
+            not target.is_relative_to(vault.resolve() / "private")
+            or target.suffix.lower() != ".md"
+            or not target.is_file()
+        ):
+            raise WoonError("TOC reader link must target an existing private Vault Markdown file")
+        if separator:
+            reader = target.read_text(encoding="utf-8")
+            reader = re.sub(r"(?ms)^(`{3,}|~{3,})[^\n]*\n.*?^\1[^\n]*$", "", reader)
+            headings = re.findall(r"(?m)^#{1,6} ([^\n]+)$", reader)
+            if not heading or headings.count(heading) != 1:
+                raise WoonError("TOC reader link must target one existing private reader heading")
+        targets.append(target)
+    return targets[0] if targets else None
 
 
 def _book_map_authored_body(text: str) -> str:
@@ -1883,23 +2160,66 @@ def _cycle_and_reachability_issues(nodes: list[WikiTreeNode]) -> list[str]:
 
 
 def _children_by_parent(nodes: tuple[WikiTreeNode, ...]) -> dict[str, tuple[WikiTreeNode, ...]]:
+    by_path = {node.relative_path: node for node in nodes}
     grouped: dict[str, list[WikiTreeNode]] = {}
     for node in nodes:
         if node.parent_path is not None:
             grouped.setdefault(node.parent_path, []).append(node)
     return {
-        parent: tuple(
+        parent: sort_wiki_children(by_path.get(parent), tuple(items))
+        for parent, items in grouped.items()
+    }
+
+
+def _uses_people_title_order(node: WikiTreeNode) -> bool:
+    return (
+        node.navigation_order == "title"
+        and node.node_kind == "hub"
+        and node.parent_path == "wiki/README.md"
+        and (node.canonical_id == "people/README" or node.title == "인물")
+    )
+
+
+def _person_initial(title: str) -> str:
+    """Derive a display label from the normalized name, never a new Wiki identity."""
+    first = normalize("NFC", title)[0]
+    syllable = ord(first) - 0xAC00
+    if 0 <= syllable < 11172:
+        return "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"[syllable // 588]
+    return first.upper()
+
+
+def sort_wiki_children(
+    parent: WikiTreeNode | None, direct: tuple[WikiTreeNode, ...]
+) -> tuple[WikiTreeNode, ...]:
+    """Sort direct children without applying explicit navigation groups.
+
+    Only the opted-in people hub uses actual titles, normalized so decomposed
+    Korean names follow the same initial/name order as composed names. Other
+    parents retain sequence order. This read-only helper is shared with AI context.
+    """
+
+    if parent is not None and _uses_people_title_order(parent):
+        return tuple(
             sorted(
-                items,
-                key=lambda item: (
-                    item.sequence is None,
-                    item.sequence if item.sequence is not None else 0,
-                    item.title.casefold(),
+                direct,
+                key=lambda node: (
+                    _person_initial(node.title).casefold(),
+                    normalize("NFC", node.title).casefold(),
+                    node.canonical_id,
                 ),
             )
         )
-        for parent, items in grouped.items()
-    }
+    return tuple(
+        sorted(
+            direct,
+            key=lambda node: (
+                node.sequence is None,
+                node.sequence if node.sequence is not None else 0,
+                node.title.casefold(),
+            ),
+        )
+    )
 
 
 def _related_neighbors(
@@ -1982,20 +2302,48 @@ def _render_keyword_link(
     sequence = f"{node.sequence:g}. " if include_sequence and node.sequence is not None else ""
     display_label = label or _compact_keyword_label(node.keywords[0])
     period = _temporal_period(node)
-    suffix = f" · {period}" if period else ""
-    suffix += _book_reader_completion_suffix(node)
-    return f"- {sequence}[[{_without_suffix(node.relative_path)}|{display_label}]]{suffix}"
+    # The career producer already owns its verified result-day title.
+    if (
+        node.entity_kind == "career-application"
+        and period
+        and any(display_label.startswith(period + separator) for separator in (" - ", " · "))
+    ):
+        period = ""
+    prefix = f"{period} · " if period else ""
+    suffix = _book_reader_completion_suffix(node)
+    return f"- {sequence}{prefix}[[{_without_suffix(node.relative_path)}|{display_label}]]{suffix}"
+
+
+def _book_reader_completion_suffix(node: WikiTreeNode) -> str:
+    """Display only an owner's explicit book status, independently of learning progress."""
+
+    if node.entity_kind == "book" and node.reader_completion == "incomplete":
+        return " (정리 미완료)"
+    return ""
 
 
 def _temporal_period(node: WikiTreeNode) -> str:
+    if node.entity_kind == "career-application":
+        day = (
+            node.ended_on
+            if node.lifecycle_status in {"completed", "cancelled", "archived"}
+            else node.started_on
+        )
+        if day is not None:
+            return day.isoformat()
     if node.occurred_on is not None:
         return node.occurred_on.isoformat()
     if node.started_on is not None and node.ended_on is not None:
         return f"{node.started_on.isoformat()} → {node.ended_on.isoformat()}"
+    if node.event_period and node.started_on is None and node.ended_on is None:
+        return node.event_period
+    if node.lifecycle_status in {"completed", "cancelled", "archived"} and node.ended_on is None:
+        start = f"{node.started_on.isoformat()} 시작 · " if node.started_on else ""
+        return f"{start}종료됨(종료일 미상)"
     if node.started_on is not None:
-        return f"{node.started_on.isoformat()} →"
+        return node.started_on.isoformat()
     if node.ended_on is not None:
-        return f"→ {node.ended_on.isoformat()}"
+        return f"{node.ended_on.isoformat()} 종료"
     return ""
 
 
@@ -2040,6 +2388,18 @@ def _render_navigation_children(
             suppress_owner_heading=book_map_kind == "section-root",
             book_chapter_toc=book_map_kind in {"chapter-root", "nested-book-map"},
         )
+    if _uses_people_title_order(parent):
+        initials: dict[str, list[WikiTreeNode]] = {}
+        for child in sort_wiki_children(parent, direct):
+            initials.setdefault(_person_initial(child.title), []).append(child)
+        return tuple(
+            row
+            for initial, people in initials.items()
+            for row in (
+                f"- {initial}",
+                *("  " + _render_keyword_link(person, label=person.title) for person in people),
+            )
+        )
 
     rows: list[str] = []
     labels = dict(
@@ -2075,9 +2435,11 @@ def _render_navigation_children(
 
 
 def _uses_keyword_heading_map(node: WikiTreeNode, nodes: dict[str, WikiTreeNode]) -> bool:
-    """Use H2 keyword groups after the new public Wiki boundary is installed."""
+    """Use H2 groups for explicit inline maps and the public Wiki boundary."""
 
-    return PUBLIC_WIKI_HUB_PATH in nodes and node.relative_path.startswith("wiki/Wiki/")
+    return node.reader_navigation == "inline" or (
+        PUBLIC_WIKI_HUB_PATH in nodes and node.relative_path.startswith("wiki/Wiki/")
+    )
 
 
 def _render_ordered_book_reader_sections(
@@ -2308,6 +2670,47 @@ def _render_explicit_navigation_group(
     return tuple(rows)
 
 
+def render_book_toc_group(
+    label: str,
+    entries: tuple[tuple[str, str, bool], ...],
+    *,
+    owner_has_body: bool = True,
+    omit_heading: bool = False,
+) -> tuple[str, ...]:
+    """Render a source-ordered book group for Wiki and private-reader TOCs.
+
+    Entries contain title, already formatted link, and actual-child presence.
+    A missing-body owner must be explicitly established by source inspection;
+    short text is never evidence of an empty section. Targets are never changed.
+    """
+
+    def section_key(title: str) -> str | None:
+        match = re.match(r"^([A-Z]|\d+)\.(\d+(?:\.\d+)*)(?=\s|$)", title)
+        return match[0] if match else None
+
+    def same_section(title: str) -> bool:
+        key = section_key(label)
+        return (
+            title == label
+            or (key is not None and key == section_key(title))
+            or (label in {"요약", "정리"} and bool(re.fullmatch(r"\d+장 (요약|정리)", title)))
+            or bool(
+                re.fullmatch(r"(\d+)장 핵심 정리", label)
+                and title == label.replace("핵심 정리", "요약")
+            )
+        )
+
+    if len(entries) == 1 and same_section(entries[0][0]) and not entries[0][2]:
+        return (f"- {entries[0][1]}",)
+    owner = 0 if entries and same_section(entries[0][0]) else None
+    rows: list[str] = []
+    if not omit_heading:
+        heading = entries[owner][1] if owner is not None and owner_has_body else label
+        rows.append(f"## {heading}")
+    rows.extend(f"- {link}" for i, (_, link, _) in enumerate(entries) if i != owner)
+    return tuple(rows)
+
+
 def _book_navigation_kind(node: WikiTreeNode, nodes: Sequence[WikiTreeNode]) -> str | None:
     """Classify every book-scoped map that owns a source TOC projection."""
 
@@ -2364,20 +2767,6 @@ def _is_root_direct_book_section(
             )
         current = parent
     return False
-
-
-def _managed_navigation_uses_h2(block: str) -> bool:
-    """Return whether a managed map owns source topic headings itself."""
-
-    return re.search(r"(?m)^##\s+\S", block) is not None
-
-
-def _managed_navigation_follows_h1(text: str, block: str) -> bool:
-    """Recognize a compiler-owned book map rendered directly below its H1."""
-
-    start = text.find(block)
-    h1 = re.search(r"(?m)^#\s+\S.*$", text)
-    return start >= 0 and h1 is not None and not text[h1.end() : start].strip()
 
 
 def _compact_keyword_label(value: str) -> str:
@@ -2460,7 +2849,7 @@ def _replace_or_append_section(text: str, heading: str, start: str, end: str, bl
         )
     empty_heading = re.compile(rf"(?ms)^## {re.escape(heading)}\s*\n\s*(?=^## |\Z)")
     if empty_heading.search(text):
-        return empty_heading.sub(f"## {heading}\n\n{block}\n", text, count=1)
+        return empty_heading.sub(lambda _: f"## {heading}\n\n{block}\n", text, count=1)
     return text.rstrip() + f"\n\n## {heading}\n\n{block}\n"
 
 
@@ -2528,205 +2917,3 @@ def _optional_marker_with_trailing_space(text: str, start: str, end: str) -> str
 
 def _without_suffix(relative_path: str) -> str:
     return Path(relative_path).with_suffix("").as_posix()
-
-
-def validate_wiki_tree_inputs(vault: Path, expected_inputs: Mapping[Path, bytes | None]) -> None:
-    """Reject changed input bytes or page membership without repeating tree validation."""
-
-    if not expected_inputs:
-        return
-    root = vault.expanduser().resolve()
-    expected_paths = {p for p, value in expected_inputs.items() if value is not None}
-    if set(iter_wiki_pages(root / "wiki")) != expected_paths:
-        raise WoonError("Wiki tree paths changed after preparation; replan")
-    for path, expected in expected_inputs.items():
-        actual = path.read_bytes() if path.is_file() else None
-        if path.is_symlink() or actual != expected:
-            raise WoonError("Wiki tree input changed after preparation; replan")
-
-
-def private_reader_target(
-    vault: Path, page_path: Path, metadata: dict[str, Any], body: str
-) -> Path | None:
-    """Validate a private pointer or book TOC; return its first verified target.
-
-    TOCs contain chapter/section headings and Markdown links, not reader prose.
-    All targets must be real private files. This does not prove book coverage.
-    """
-    if (
-        metadata.get("access") not in {"local-only", "private"}
-        or metadata.get("publish") is not False
-    ):
-        return None
-    pattern = r"\[[^\]\n]+\]\((<[^<>\n]+>|[^()\n]+)\)"
-    single = re.fullmatch(pattern, body.strip())
-    links = [single.group(1)] if single is not None else []
-    if single is None:
-        if metadata.get("entity_kind") != "book":
-            return None
-        for line in body.splitlines():
-            if not line.strip():
-                continue
-            linked_heading = re.fullmatch(r"#{2,3} " + pattern, line)
-            if linked_heading is not None:
-                links.append(linked_heading.group(1))
-                continue
-            if re.fullmatch(r"#{2,3} [^#\[\]\n]+", line):
-                continue
-            link = re.fullmatch(r"\s*- " + pattern, line)
-            if link is None:
-                return None
-            links.append(link.group(1))
-    targets = []
-    for raw in links:
-        location = unquote(raw[1:-1] if raw.startswith("<") else raw)
-        location, separator, heading = location.partition("#")
-        relative = Path(location)
-        candidate = page_path.parent / relative
-        if (
-            any(character in location for character in ("#", "?", "\\", "\0"))
-            or relative.is_absolute()
-            or candidate.is_symlink()
-            or any(parent.is_symlink() for parent in candidate.parents)
-        ):
-            raise WoonError("TOC reader link must target an existing private Vault Markdown file")
-        target = candidate.resolve()
-        if (
-            not target.is_relative_to(vault.resolve() / "private")
-            or target.suffix.lower() != ".md"
-            or not target.is_file()
-        ):
-            raise WoonError("TOC reader link must target an existing private Vault Markdown file")
-        if separator:
-            reader = target.read_text(encoding="utf-8")
-            reader = re.sub(r"(?ms)^(`{3,}|~{3,})[^\n]*\n.*?^\1[^\n]*$", "", reader)
-            headings = re.findall(r"(?m)^#{1,6} ([^\n]+)$", reader)
-            if not heading or headings.count(heading) != 1:
-                raise WoonError("TOC reader link must target one existing private reader heading")
-        targets.append(target)
-    return targets[0] if targets else None
-
-
-def render_book_toc_group(
-    label: str,
-    entries: tuple[tuple[str, str, bool], ...],
-    *,
-    owner_has_body: bool = True,
-    omit_heading: bool = False,
-) -> tuple[str, ...]:
-    """Render a source-ordered book group for Wiki and private-reader TOCs.
-
-    Entries contain title, already formatted link, and actual-child presence.
-    A missing-body owner must be explicitly established by source inspection;
-    short text is never evidence of an empty section. Targets are never changed.
-    """
-
-    def section_key(title: str) -> str | None:
-        match = re.match(r"^([A-Z]|\d+)\.(\d+(?:\.\d+)*)(?=\s|$)", title)
-        return match[0] if match else None
-
-    def same_section(title: str) -> bool:
-        key = section_key(label)
-        return (
-            title == label
-            or (key is not None and key == section_key(title))
-            or (label in {"요약", "정리"} and bool(re.fullmatch(r"\d+장 (요약|정리)", title)))
-            or bool(
-                re.fullmatch(r"(\d+)장 핵심 정리", label)
-                and title == label.replace("핵심 정리", "요약")
-            )
-        )
-
-    if len(entries) == 1 and same_section(entries[0][0]) and not entries[0][2]:
-        return (f"- {entries[0][1]}",)
-    owner = 0 if entries and same_section(entries[0][0]) else None
-    rows: list[str] = []
-    if not omit_heading:
-        heading = entries[owner][1] if owner is not None and owner_has_body else label
-        rows.append(f"## {heading}")
-    rows.extend(f"- {link}" for i, (_, link, _) in enumerate(entries) if i != owner)
-    return tuple(rows)
-
-
-def _book_reader_completion_suffix(node: WikiTreeNode) -> str:
-    """Display only an owner's explicit book status, independently of learning progress."""
-
-    if node.entity_kind == "book" and node.reader_completion == "incomplete":
-        return " (정리 미완료)"
-    return ""
-
-
-def _book_leaf_footers(
-    nodes: tuple[WikiTreeNode, ...],
-    texts: dict[str, str],
-    children: dict[str, tuple[WikiTreeNode, ...]],
-    selected_paths: frozenset[str],
-) -> dict[str, str]:
-    """Project a book's explicit TOC order onto its actual content leaves once."""
-
-    result: dict[str, str] = {}
-    by_id = {node.canonical_id: node for node in nodes}
-    by_path = {node.relative_path: node for node in nodes}
-    selected_books: set[str] = set()
-    for path in selected_paths:
-        current = by_path[path]
-        ancestors: set[str] = set()
-        while current.relative_path not in ancestors:
-            ancestors.add(current.relative_path)
-            if current.entity_kind == "book":
-                selected_books.add(current.relative_path)
-                break
-            if current.parent_path not in by_path:
-                break
-            current = by_path[current.parent_path]
-    for book in nodes:
-        if not book.reader_leaf_navigation or book.relative_path not in selected_books:
-            continue
-        leaves: list[WikiTreeNode] = []
-        seen: set[str] = set()
-
-        def visit(
-            node: WikiTreeNode, ordered_leaves: list[WikiTreeNode], visited: set[str]
-        ) -> None:
-            if node.canonical_id in visited:
-                raise WoonError("book leaf navigation must visit every page once")
-            visited.add(node.canonical_id)
-            direct = children.get(node.relative_path, ())
-            if not direct:
-                metadata, _ = split_markdown(texts[node.relative_path])
-                if (
-                    node.node_kind == "detail"
-                    and metadata.get("content_state") != "toc-only"
-                    and _has_direct_reader_content(texts[node.relative_path])
-                ):
-                    ordered_leaves.append(node)
-                return
-            if node.navigation_groups:
-                ids = [item for group in node.navigation_groups for item in group.child_ids]
-                if len(ids) != len(set(ids)) or set(ids) != {
-                    child.canonical_id for child in direct
-                }:
-                    raise WoonError("book leaf navigation requires complete explicit child order")
-                ordered = tuple(by_id[item] for item in ids)
-            else:
-                ordered = direct
-            for child in ordered:
-                if child.entity_kind != "book":
-                    visit(child, ordered_leaves, visited)
-
-        visit(book, leaves, seen)
-        for index, leaf in enumerate(leaves):
-            links: list[str] = []
-            if index:
-                previous = leaves[index - 1]
-                links.append(f"[[{previous.relative_path.removesuffix('.md')}|← {previous.title}]]")
-            links.append(f"[[{book.relative_path.removesuffix('.md')}|책 목차]]")
-            if index + 1 < len(leaves):
-                following = leaves[index + 1]
-                links.append(
-                    f"[[{following.relative_path.removesuffix('.md')}|{following.title} →]]"
-                )
-            result[leaf.relative_path] = (
-                BOOK_READER_FOOTER_START + "\n" + " · ".join(links) + "\n" + BOOK_READER_FOOTER_END
-            )
-    return result

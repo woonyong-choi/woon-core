@@ -2481,6 +2481,46 @@ def test_book_coverage_accepts_pinned_static_exception_and_rejects_missing_evide
     assert any("original_test_evidence is required" in error for error in rejected.runnable.errors)
 
 
+def _source_pinned_static_fixture(vault: Path):
+    target, manifest = _verified_fixture(vault)
+    _write_verified_root_map(vault)
+    _upgrade_manifest_to_v7(vault, manifest)
+    leaf = vault / "wiki/books/kotlin/chapter-01.md"
+    static_body = "externalCall(42)\notherCall();\n"
+    leaf.write_text(
+        leaf.read_text(encoding="utf-8").replace(
+            "```run-kotlin\nfun main() = println(2)\n```",
+            f"```kotlin\n{static_body}```",
+        ),
+        encoding="utf-8",
+    )
+    elements = manifest["source_elements"]
+    assignments = manifest["source_element_assignments"]
+    nodes = manifest["nodes"]
+    assert isinstance(elements, list) and isinstance(assignments, list)
+    assert isinstance(nodes, list) and isinstance(nodes[0], dict)
+    assert isinstance(elements[2], dict) and isinstance(assignments[2], dict)
+    elements[2]["runnable_support"] = "static-exception"
+    assignments[2] = {
+        "element_id": elements[2]["element_id"],
+        "owner_id": "books/kotlin/chapter-01",
+        "delivery": "static-exception",
+        "static_language": "kotlin",
+        "static_block_index": 1,
+        "static_body_sha256": hashlib.sha256(static_body.encode("utf-8")).hexdigest(),
+        "exception_reason_code": "dependency",
+        "runnable_required": False,
+        "source_locator": elements[2]["source_locator"],
+        "source_sha256": elements[2]["source_sha256"],
+        "original_test_evidence": "evidence/source-code-inventory.json",
+        "original_test_sha256": "d" * 64,
+    }
+    nodes[0]["runnable"] = {"expected": 1, "verified": 1}
+    target.write_text(json.dumps(manifest), encoding="utf-8")
+
+    return target, manifest, leaf, static_body
+
+
 def test_book_coverage_accepts_source_pinned_static_code_without_synthetic_harness(
     tmp_path: Path,
 ) -> None:
@@ -3034,46 +3074,6 @@ def test_book_coverage_rejects_generated_semantic_ledger_and_broken_korean(
         "reader body contains workflow or completion metadata" in error
         for error in report.quality.errors
     )
-
-
-def _source_pinned_static_fixture(vault: Path):
-    target, manifest = _verified_fixture(vault)
-    _write_verified_root_map(vault)
-    _upgrade_manifest_to_v7(vault, manifest)
-    leaf = vault / "wiki/books/kotlin/chapter-01.md"
-    static_body = "externalCall(42)\notherCall();\n"
-    leaf.write_text(
-        leaf.read_text(encoding="utf-8").replace(
-            "```run-kotlin\nfun main() = println(2)\n```",
-            f"```kotlin\n{static_body}```",
-        ),
-        encoding="utf-8",
-    )
-    elements = manifest["source_elements"]
-    assignments = manifest["source_element_assignments"]
-    nodes = manifest["nodes"]
-    assert isinstance(elements, list) and isinstance(assignments, list)
-    assert isinstance(nodes, list) and isinstance(nodes[0], dict)
-    assert isinstance(elements[2], dict) and isinstance(assignments[2], dict)
-    elements[2]["runnable_support"] = "static-exception"
-    assignments[2] = {
-        "element_id": elements[2]["element_id"],
-        "owner_id": "books/kotlin/chapter-01",
-        "delivery": "static-exception",
-        "static_language": "kotlin",
-        "static_block_index": 1,
-        "static_body_sha256": hashlib.sha256(static_body.encode("utf-8")).hexdigest(),
-        "exception_reason_code": "dependency",
-        "runnable_required": False,
-        "source_locator": elements[2]["source_locator"],
-        "source_sha256": elements[2]["source_sha256"],
-        "original_test_evidence": "evidence/source-code-inventory.json",
-        "original_test_sha256": "d" * 64,
-    }
-    nodes[0]["runnable"] = {"expected": 1, "verified": 1}
-    target.write_text(json.dumps(manifest), encoding="utf-8")
-
-    return target, manifest, leaf, static_body
 
 
 def test_ordered_static_parts_keep_one_source_and_all_payload_bytes(tmp_path: Path) -> None:

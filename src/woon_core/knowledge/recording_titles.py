@@ -12,7 +12,7 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -266,8 +266,9 @@ def prepare_recording_title_bundle(
     }
     renames: dict[str, tuple[str, str, str]] = {}
     for write in bundle.readers:
+        assert write.target_path is not None
         reader_source = PurePosixPath(write.current_path)
-        reader_target = PurePosixPath(cast(str, write.target_path))
+        reader_target = PurePosixPath(write.target_path)
         if (
             not reader_source.as_posix().startswith(_ARCHIVE + "recordings/")
             or reader_source.parent != reader_target.parent
@@ -283,7 +284,7 @@ def prepare_recording_title_bundle(
         title = validate_recording_title_change(before, after, recording_id)
         if reader_target.stem != title:
             raise WoonError("recording target filename must equal the reviewed title")
-        renames[recording_id] = (write.current_path, cast(str, write.target_path), title)
+        renames[recording_id] = (write.current_path, write.target_path, title)
     validate_recording_catalog_change(*values[bundle.catalog.current_path], renames)
     catalog = json.loads(values[bundle.catalog.current_path][0])
     records = {row["recording_id"]: row for row in catalog["records"]}
@@ -352,8 +353,7 @@ def prepare_recording_title_bundle(
             }
 
             def current_table_link(
-                match: re.Match[str],
-                names: Mapping[str, tuple[str, str]] = names,
+                match: re.Match[str], names: dict[str, tuple[str, str]] = names
             ) -> str:
                 if match[1] not in names or re.fullmatch(r"\\?\|[^\]]*", match[2]) is None:
                     return match[0]

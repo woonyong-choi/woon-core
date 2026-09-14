@@ -16,8 +16,16 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from markdown_it import MarkdownIt
 
 from woon_core.errors import WoonError
+from woon_core.knowledge.content_quality_scope import (
+    BOOK_READER_REASON,
+    PRIVATE_NOVEL_REASON,
+    SOURCE_INDEX_REASON,
+    book_reader_roots,
+    content_quality_exclusion_reason,
+)
 
 RUBRIC = {
     "reader_goal",
@@ -48,7 +56,8 @@ def evaluate_content_quality(
     pass: every current page needs a passed review with all rubric dimensions.
     """
 
-    expected = _compiled_pages(vault)
+    all_compiled = _compiled_pages(vault)
+    expected, exclusions = _review_scope(vault, all_compiled)
     markdown_by_page = _compiled_markdown(vault, expected)
     payload = _load_object(reviews_path, "content quality review")
     if payload.get("version") != 1:
@@ -66,6 +75,7 @@ def evaluate_content_quality(
         errors.append("content quality review used a stale or incorrect writing standard")
     if evaluator["prompt_sha256"] != actual_prompt_sha256:
         errors.append("content quality review used a stale or incorrect review prompt")
+    _validate_review_scope(payload.get("scope"), exclusions, errors)
     reviewed: set[str] = set()
     stale = 0
     rejected = 0
@@ -76,8 +86,11 @@ def evaluate_content_quality(
         if page_id in reviewed:
             raise WoonError(f"duplicate content quality review: {page_id}")
         reviewed.add(page_id)
-        if page_id not in expected:
+        if page_id not in all_compiled:
             errors.append(f"quality review references unknown page: {page_id}")
+            continue
+        if page_id not in expected:
+            errors.append(f"quality review references excluded page: {page_id}")
             continue
         output_sha256 = _digest(raw_review.get("output_sha256"), "quality review output_sha256")
         if output_sha256 != expected[page_id]:
@@ -112,7 +125,9 @@ def evaluate_content_quality(
         "standard": standard,
         "prompt": {"sha256": actual_prompt_sha256},
         "coverage": {
-            "compiled_pages": len(expected),
+            "compiled_pages": len(all_compiled),
+            "reviewable_pages": len(expected),
+            "excluded_pages": len(exclusions),
             "reviewed_pages": len(reviewed.intersection(expected)),
             "missing_pages": len(missing),
             "stale_reviews": stale,
@@ -175,6 +190,8 @@ def _compiled_markdown(vault: Path, expected: dict[str, str]) -> dict[str, str]:
     markdown_by_page: dict[str, str] = {}
     for page in pages:
         page_id = _text(page.get("page_id"), "page spec page_id")
+        if page_id not in expected:
+            continue
         output_path = _text(page.get("output_path"), "page spec output_path")
         relative = Path(output_path)
         if relative.is_absolute() or ".." in relative.parts:
@@ -190,6 +207,86 @@ def _compiled_markdown(vault: Path, expected: dict[str, str]) -> dict[str, str]:
             raise WoonError(f"compiled page bytes do not match receipt: {page_id}")
         markdown_by_page[page_id] = markdown
     return markdown_by_page
+
+
+def _review_scope(
+    vault: Path, all_compiled: dict[str, str]
+) -> tuple[dict[str, str], list[dict[str, str]]]:
+    """Split general prose from page types with their own quality contract."""
+
+    pages = _load_yaml_list(vault / "catalog/llm-wiki/pages.yaml", "pages")
+    roots = book_reader_roots(pages)
+    expected: dict[str, str] = {}
+    exclusions: list[dict[str, str]] = []
+    for page in pages:
+        page_id = _text(page.get("page_id"), "quality scope page_id")
+        output_path = _text(page.get("output_path"), "quality scope output_path")
+        output_hash = all_compiled.get(page_id)
+        if output_hash is None:
+            raise WoonError(f"quality scope page lacks compiled receipt: {page_id}")
+        frontmatter = page.get("frontmatter")
+        if frontmatter is not None and not isinstance(frontmatter, dict):
+            raise WoonError("quality scope page frontmatter must be a mapping")
+        reason = content_quality_exclusion_reason(page_id, output_path, roots, frontmatter)
+        if reason is None:
+            expected[page_id] = output_hash
+            continue
+        exclusions.append(
+            {
+                "page_id": page_id,
+                "relative_path": f"wiki/{output_path}",
+                "title": _text(page.get("title"), "quality scope page title"),
+                "output_sha256": output_hash,
+                "reason": reason,
+            }
+        )
+    if set(expected).union(item["page_id"] for item in exclusions) != set(all_compiled):
+        raise WoonError("quality scope does not account for every compiled page")
+    return expected, sorted(exclusions, key=lambda item: item["page_id"])
+
+
+def _validate_review_scope(
+    value: object, exclusions: list[dict[str, str]], errors: list[str]
+) -> None:
+    """Verify non-hosted pages were excluded deliberately, not silently lost."""
+
+    if value is None:
+        if exclusions:
+            errors.append("content quality review does not declare required exclusion scope")
+        return
+    if not isinstance(value, dict) or set(value) != {"exclusions_sha256", "exclusions"}:
+        raise WoonError(
+            "content quality review scope must contain exclusions_sha256 and exclusions"
+        )
+    declared = value["exclusions"]
+    if not isinstance(declared, list) or any(not isinstance(item, dict) for item in declared):
+        raise WoonError("content quality review scope exclusions must be a mapping list")
+    required_fields = {"page_id", "relative_path", "title", "output_sha256", "reason"}
+    for exclusion in declared:
+        if set(exclusion) != required_fields:
+            raise WoonError("content quality review scope exclusion has unexpected fields")
+        _text(exclusion.get("page_id"), "content quality review scope page_id")
+        _text(exclusion.get("relative_path"), "content quality review scope relative_path")
+        _text(exclusion.get("title"), "content quality review scope title")
+        _digest(exclusion.get("output_sha256"), "content quality review scope output_sha256")
+        if _text(exclusion.get("reason"), "content quality review scope reason") not in {
+            PRIVATE_NOVEL_REASON,
+            BOOK_READER_REASON,
+            SOURCE_INDEX_REASON,
+        }:
+            raise WoonError("content quality review scope exclusion has an unknown reason")
+    digest = _exclusions_digest(exclusions)
+    if value["exclusions_sha256"] != digest or declared != exclusions:
+        errors.append("content quality review exclusion scope is stale or incorrect")
+
+
+def _exclusions_digest(exclusions: list[dict[str, str]]) -> str:
+    digest = hashlib.sha256()
+    for exclusion in sorted(exclusions, key=lambda item: item["page_id"]):
+        for key in ("page_id", "relative_path", "title", "output_sha256", "reason"):
+            digest.update(exclusion[key].encode("utf-8"))
+            digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def validate_criterion_evidence(
@@ -295,6 +392,13 @@ def criterion_anchor_candidates(markdown: str, criterion: str) -> list[str]:
     if criterion not in RUBRIC:
         raise WoonError(f"unknown quality review criterion: {criterion}")
     frontmatter, body = _split_frontmatter(markdown)
+    code_lines = {
+        index
+        for token in MarkdownIt("commonmark").parse("\n".join(body))
+        if token.type in {"fence", "code_block"} and token.map is not None
+        for index in range(*token.map)
+    }
+    body = [line for index, line in enumerate(body) if index not in code_lines]
     headings = _unique(
         line.lstrip("#").strip()
         for line in body
@@ -363,7 +467,6 @@ def _prose_candidates(lines: list[str]) -> list[str]:
 
     candidates: list[str] = []
     in_breadcrumb = False
-    in_code_fence = False
     for raw_line in lines:
         line = raw_line.strip()
         if line == "<!-- breadcrumb:start -->":
@@ -372,16 +475,12 @@ def _prose_candidates(lines: list[str]) -> list[str]:
         if line == "<!-- breadcrumb:end -->":
             in_breadcrumb = False
             continue
-        if line.startswith("```"):
-            in_code_fence = not in_code_fence
-            continue
         is_list_item = line.startswith(("- ", "* "))
         if is_list_item:
             line = line[2:].strip()
         if (
             not line
             or in_breadcrumb
-            or in_code_fence
             or line.startswith(("#", "<!--", ">", "|", "[["))
             or line.startswith("    ")
             or not 12 <= len(line) <= 240

@@ -83,8 +83,8 @@ _CODEX_OWNED_PATHS = {
     "brain/review/codex",
     ".local/woon-knowledge/codex-knowledge",
     ".local/woon-knowledge/document-intake",
-    "wiki/private/_sources/codex",
-    "wiki/private/_sources/knowledge",
+    "private/codex",
+    "private/knowledge",
 }
 _CALENDAR_LINK_REASONS = {"준비", "작업", "결정", "결과", "참고"}
 _PERSON_NAME_RE = re.compile(r"[A-Za-z가-힣][A-Za-z가-힣 .'-]{0,47}")
@@ -1018,10 +1018,6 @@ def _validate_lifecycle(
         raise WoonError(f"Codex knowledge {label} occurred_on cannot be combined with a date range")
     if started_on is not None and ended_on is not None and ended_on < started_on:
         raise WoonError(f"Codex knowledge {label} ended_on cannot precede started_on")
-    if lifecycle_status in {"completed", "cancelled", "archived"} and not (ended_on or occurred_on):
-        raise WoonError(
-            f"Codex knowledge {label} closed lifecycle requires ended_on or occurred_on"
-        )
     if lifecycle_status in {"idea", "planned", "active", "paused"} and ended_on is not None:
         raise WoonError(f"Codex knowledge {label} open lifecycle cannot have ended_on")
 
@@ -2017,23 +2013,13 @@ def _ensure_private_runtime_parent(vault: Path, parent: Path) -> None:
         current.chmod(0o700)
 
 
-_ENTRY_REVIEW_KINDS = {
-    "일정": "일정 검토",
-    "할 일": "할 일 검토",
-    "커리어": "커리어 근거 검토",
-    "창작": "창작 연결 검토",
-    "자료": "자료 보관 검토",
-    "재정·행정": "행정 확인",
-}
-
-
 def _review_candidates(entries: tuple[CodexKnowledgeEntry, ...]) -> tuple[ReviewCandidate, ...]:
     """Project actionable conclusions to human review without external side effects.
 
     A person mention is intentionally narrower than an ordinary projection: it
-    stores only explicit facts and remains unlinked.  All other action-shaped
-    conclusions become a readable review card, never a direct external task,
-    Calendar, person-card, or source mutation.
+    stores only explicit facts and remains unlinked. General cards require an
+    explicit unresolved disposition; domain labels alone do not imply review.
+    This function never performs external or person-source mutations.
     """
 
     candidates: list[ReviewCandidate] = []
@@ -2059,26 +2045,8 @@ def _review_candidates(entries: tuple[CodexKnowledgeEntry, ...]) -> tuple[Review
                 )
             )
             continue
-        review_kind = _ENTRY_REVIEW_KINDS.get(entry.kind)
-        if review_kind is not None:
-            stable = "\0".join((_entry_id(entry), review_kind, entry.title, entry.summary))
-            candidates.append(
-                ReviewCandidate(
-                    candidate_id=(
-                        "codex-projection-"
-                        f"{hashlib.sha256(stable.encode('utf-8')).hexdigest()[:24]}"
-                    ),
-                    kind="codex-projection",
-                    source_locator=f"codex:{_entry_id(entry)}",
-                    summary=entry.summary.strip(),
-                    display_title=f"{review_kind}: {entry.title.strip()}"[:72],
-                    review_kind=review_kind,
-                    occurred_at=datetime.fromtimestamp(0, tz=UTC),
-                    time_precision="none",
-                    scheduled_for=None,
-                    calendar_candidate=False,
-                )
-            )
+        # Organized content is already owned by its Wiki delta. Domain labels
+        # alone are not unresolved work; explicit review retains that boundary.
         for person in entry.people:
             title = f"{person.display_name.strip()}: {person.explicit_facts[0].strip()}"[:48]
             stable = "\0".join((_entry_id(entry), person.display_name, *person.explicit_facts))

@@ -63,6 +63,8 @@ class SearchResult:
     heading: str
     score: float
     snippet: str
+    freshness: str = "current"
+    verification_state: str = "not-checked"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +78,8 @@ class KnowledgeExcerpt:
     chunk_id: str
     heading: str
     text: str
+    freshness: str = "current"
+    verification_state: str = "not-checked"
 
 
 @dataclass(frozen=True, slots=True)

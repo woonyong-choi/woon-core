@@ -75,12 +75,14 @@ uv run woon knowledge document-resolve \
 uv run woon knowledge document-audit --vault /path/to/woon-knowledge
 ```
 
-- `integrated`: 재사용 가치가 있는 의미만 기존 Wiki에 병합하고 원본 bytes를 `wiki/private/_sources/knowledge/`에 hash 그대로 보존한다.
+- `integrated`: 재사용 가치가 있는 의미만 기존 Wiki에 병합하고 원본 bytes를 `private/knowledge/`의 해당 source 경계에 hash 그대로 보존한다. 기존 `wiki/private/_sources/knowledge/` 영수증도 계속 읽는다.
 - `duplicate`: 새 페이지를 만들지 않고 기존 정본과 보존 source에 연결한다.
 - `discarded`: 데모·저가치·화면 chrome·범위 밖·사용 불가 추출을 visible 문서 없이 hidden receipt로 끝낸다.
 - `user-action-required`: `consequential-claim`, `identity-conflict`, `privacy-boundary` 중 하나이며 질문 하나만 남긴다. 일반 OCR 잡음이나 정리 판단에는 쓰지 않는다.
 
 `document-audit`은 미종결 후보, 사용자 판단 적체, receipt/source drift가 하나라도 있으면 실패한다. 이 실패는 유지보수 실행의 완료를 막는다.
+
+종결한 변환 임시물을 정리할 때는 [Core Inbox 인터페이스](../README.md#명시적-inbox-처리)의 `document-status`와 `document-cleanup`을 사용한다. v1 영수증은 기존 추출물과 함께 검증하고, cleanup은 정확한 영수증 SHA와 owned 파일 목록을 고정한 v2 영수증을 먼저 기록한다. 중간 삭제가 실패하면 남은 파일만 검증·정리하며 사용자 추가·변경 파일과 symlink는 보존하고 실패한다. 완료 뒤 같은 변환 ID는 추출물을 재생성하지 않고 compact terminal 결과를 반환한다. converter·옵션 버전이 달라져 새 conversion ID가 생긴 경우는 별도 변환이며 semantic Inbox identity와 혼동하지 않는다. 원본 bytes·Wiki·source archive는 이 cleanup 대상이 아니다. 영수증 hash는 삭제한 bytes의 백업이 아니다.
 
 ## 제한
 

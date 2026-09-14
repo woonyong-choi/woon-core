@@ -45,7 +45,14 @@ def build_knowledge_service(
     )
     compiled_wiki = CompiledWiki(settings.compiled_wiki) if settings.compiled_wiki else None
     return settings, KnowledgeService(
-        repository, index, history, corpus, compiled_wiki=compiled_wiki
+        repository,
+        index,
+        history,
+        corpus,
+        compiled_wiki=compiled_wiki,
+        snapshot_vault=settings.vault if settings.search_freshness == "document" else None,
+        snapshot_roots=(settings.canonical_root, *(root.path for root in settings.search_roots)),
+        snapshot_exclusions=settings.search_exclusions,
     )
 
 

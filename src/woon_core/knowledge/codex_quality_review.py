@@ -360,6 +360,14 @@ revisitability, current_use를 pass 또는 fail로 판정한다.
 - revisitability: H1/H2, 정확한 용어와 경계로 나중에 다시 찾을 수 있다.
 - current_use: frontmatter purpose가 본문의 현재 학습, 설명, 검색 목적과 맞는다.
 
+일반 개발 detail 문서의 H1은 짧은 정식 키워드여야 한다. H2는 그 글에서 실제로 바뀌는
+값·상태·동작·판단 기준을 짧게 가리켜야 한다. 따라서 `질문`, `실행`, `결과`, `해석`,
+`확장`, `정리`, `이어서 읽기`처럼 어느 문서에나 붙는 진행 표제와, 제목을 그대로 되풀이한
+`… 코드`, `… 필요성`, `… 개요` 같은 표제는 현재 Markdown에서 확인되면 revisitability를
+fail로 판정하라. 단, 실제 책 장절 제목, 사람·프로젝트·원자료의 식별자, hyperlink-only
+탐색 surface에는 이 규칙을 적용하지 않는다. H2가 없거나 적은 짧은 문서는 그 사실만으로
+fail이 아니다.
+
 일반 교과 개념이나 원리 설명은 compiler의 source·claim·receipt 계층이 출처를 소유한다.
 따라서 본문에 inline citation이 없다는 이유만으로 evidence_boundary를 fail로 두지 마라.
 본문이 특정 버전의 실제 실행·측정 결과처럼 말하거나 사실·해석·미결정을 서로 섞을 때만 fail이다.

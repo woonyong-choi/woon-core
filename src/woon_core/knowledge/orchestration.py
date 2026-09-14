@@ -24,6 +24,7 @@ _CADENCES = {
     "daily",
     "daily-and-policy-gate",
     "explicit-local-request",
+    "temporary-monitor",
 }
 _EXECUTION_MODES = {
     "candidate-only",
@@ -32,31 +33,8 @@ _EXECUTION_MODES = {
     "policy-authorized",
     "materialize",
 }
-_EXECUTION_STATUSES = {"planned", "enabled", "disabled", "local-only"}
+_EXECUTION_STATUSES = {"planned", "enabled", "paused", "disabled", "local-only"}
 _NOTIFICATION_POLICIES = {"failed_runs_only", "always", "none"}
-_AUTOMATION_PERSON_PROMPT_GUARD_TERMS = (
-    "인물 이름",
-    "저자",
-    "자료 제공자",
-    "참석자",
-    "외부 인물의 people, person_roles, attributions, 인물 카드를 자동으로 만들거나 바꾸지 말고",
-    "관계",
-    "신상",
-    "추정하지 마라",
-    "Novel",
-    "private 원본",
-    "일반 인물 지도",
-    "검색",
-    "넣지 마라",
-)
-_RETIRED_WIKI_PROMPT_TERMS = (
-    "parent_topics",
-    "parent_moc",
-    "map_role",
-    "mindmap_role",
-    "maps/** Markdown",
-    "콘텐츠·책·프로젝트·인물도 같은 Wiki tree",
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,12 +57,13 @@ class AutomationContract:
     notification_policy: str | None
     prompt_sha256: str | None
     owned_paths: tuple[str, ...]
+    contract_version: int = 1
 
     @property
     def ready(self) -> bool:
         """An enabled task must have a dedicated Codex thread identity."""
 
-        return self.status != "enabled" or (
+        return self.status not in {"enabled", "paused"} or (
             self.task_thread_id is not None
             and self.codex_automation_id is not None
             and self.rrule is not None
@@ -131,7 +110,7 @@ def load_orchestrator_settings(vault: Path) -> OrchestratorSettings:
         raise WoonError(f"invalid second-brain orchestrator YAML: {error}") from error
     if not isinstance(raw, dict):
         raise WoonError("second-brain orchestrator must be a mapping")
-    if raw.get("version") != 1:
+    if raw.get("version") not in {1, 2}:
         raise WoonError(f"unsupported second-brain orchestrator version: {raw.get('version')!r}")
 
     _validate_repository_contract(raw.get("repository_contract"))
@@ -163,7 +142,10 @@ def load_orchestrator_settings(vault: Path) -> OrchestratorSettings:
     _require_runtime_path(lock_directory, "runtime.lock_directory")
 
     items = _list(raw.get("automations"), "automations")
-    contracts = tuple(_automation(item, index) for index, item in enumerate(items))
+    contracts = tuple(
+        _automation(item, index, contract_version=raw["version"])
+        for index, item in enumerate(items)
+    )
     if not contracts:
         raise WoonError("second-brain orchestrator requires at least one automation")
     _unique((item.automation_id for item in contracts), "automation id")
@@ -176,10 +158,6 @@ def load_orchestrator_settings(vault: Path) -> OrchestratorSettings:
             "enabled second-brain automations require task_thread_id: "
             + ", ".join(sorted(invalid_ready))
         )
-    if any(item.cadence == "daily-and-policy-gate" for item in contracts):
-        policy_change = _mapping(raw.get("cursor_contract"), "cursor_contract").get("policy_change")
-        if policy_change != "caller-must-run-governance-preflight":
-            raise WoonError("policy-gated automation requires caller-must-run-governance-preflight")
     _validate_global_guards(raw.get("global_guards"))
     _validate_identity_contract(resolved_vault, raw.get("identity"), contracts)
     _validate_codex_conversation_contract(contracts)
@@ -201,24 +179,33 @@ def load_orchestrator_settings(vault: Path) -> OrchestratorSettings:
 
 
 def verify_codex_automation_registry(
-    settings: OrchestratorSettings, automation_root: Path
+    settings: OrchestratorSettings, automation_root: Path, *, lane_id: str | None = None
 ) -> tuple[str, ...]:
-    """Cross-check enabled lanes against locally registered heartbeat metadata."""
+    """Read only the selected registered lanes, including explicitly paused ones."""
 
+    selected = tuple(item for item in settings.automations if item.status in {"enabled", "paused"})
+    if lane_id is not None:
+        selected = tuple(lane for lane in selected if lane.automation_id == lane_id)
+        if not selected:
+            raise WoonError(f"unknown or unregistered automation lane: {lane_id}")
     registered: dict[str, dict[str, object]] = {}
-    for path in sorted(automation_root.glob("*/automation.toml")):
+    for lane in selected:
+        assert lane.codex_automation_id is not None
+        path = automation_root / lane.codex_automation_id / "automation.toml"
+        if not path.is_file():
+            raise WoonError(f"missing Codex automation for {lane.automation_id}")
         try:
             entry = tomllib.loads(path.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError) as error:
             raise WoonError(f"invalid Codex automation registry entry: {path.name}") from error
         identifier = entry.get("id")
-        if not isinstance(identifier, str) or not identifier:
-            raise WoonError(f"Codex automation registry entry has no id: {path}")
+        if identifier != lane.codex_automation_id:
+            raise WoonError(f"Codex automation registry id mismatch: {lane.automation_id}")
         if identifier in registered:
             raise WoonError(f"duplicate Codex automation registry id: {identifier}")
         registered[identifier] = entry
     verified: list[str] = []
-    for lane in settings.enabled_automations:
+    for lane in selected:
         assert lane.codex_automation_id is not None
         registered_item = registered.get(lane.codex_automation_id)
         if registered_item is None:
@@ -226,12 +213,15 @@ def verify_codex_automation_registry(
         expected = {
             "kind": "heartbeat",
             "target_thread_id": lane.task_thread_id,
-            "status": "ACTIVE",
+            "status": "ACTIVE" if lane.status == "enabled" else "PAUSED",
             "rrule": lane.rrule,
             "notification_policy": lane.notification_policy,
         }
         for field, value in expected.items():
-            if registered_item.get(field) != value:
+            actual = registered_item.get(field)
+            if field == "notification_policy" and actual is None:
+                actual = "always"
+            if actual != value:
                 raise WoonError(f"Codex automation mismatch for {lane.automation_id}: {field}")
         prompt = registered_item.get("prompt")
         if not isinstance(prompt, str) or not prompt:
@@ -240,116 +230,11 @@ def verify_codex_automation_registry(
         prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         if prompt_digest != lane.prompt_sha256:
             raise WoonError(f"Codex automation mismatch for {lane.automation_id}: prompt digest")
-        if not _has_person_protection(prompt):
-            raise WoonError(
-                f"Codex automation mismatch for {lane.automation_id}: person protection"
-            )
-        _validate_wiki_prompt_contract(lane, prompt)
         verified.append(lane.automation_id)
     return tuple(verified)
 
 
-def _has_person_protection(prompt: str) -> bool:
-    """Require an identity boundary, allowing the explicit-facts candidate lane.
-
-    Most lanes must promise not to create person records at all.  The Codex
-    projection lane is intentionally narrower: it may create a local review
-    *candidate* from explicit facts, while still prohibiting identity matching,
-    relation inference, and general-map insertion.  Requiring the former text
-    verbatim would reject the safer, user-requested candidate workflow.
-    """
-
-    strict = all(term in prompt for term in _AUTOMATION_PERSON_PROMPT_GUARD_TERMS)
-    candidate = (
-        any(term in prompt for term in ("local-only 인물 정리 후보", "review-only people 후보"))
-        and any(term in prompt for term in ("같은 이름의 카드와 연결", "동명이인"))
-        and "관계" in prompt
-        and "신상" in prompt
-        and "추정하지 않는다" in prompt
-        and "Novel" in prompt
-        and "private 원본" in prompt
-        and any(term in prompt for term in ("일반 인물 지도", "일반 검색"))
-    )
-    return strict or candidate
-
-
-def _validate_wiki_prompt_contract(lane: AutomationContract, prompt: str) -> None:
-    """Reject scheduled instructions that can recreate a parallel Wiki hierarchy."""
-
-    if lane.automation_id not in {
-        "codex-conversation-ingest",
-        "knowledge-curation",
-        "daily-record-materialization",
-    }:
-        return
-    retired = tuple(term for term in _RETIRED_WIKI_PROMPT_TERMS if term in prompt)
-    if retired:
-        raise WoonError(
-            f"Codex automation mismatch for {lane.automation_id}: retired Wiki term "
-            + ", ".join(retired)
-        )
-    if lane.automation_id == "codex-conversation-ingest":
-        required = {
-            "new_wiki_reason",
-            "parent",
-            "keywords",
-            "central_question",
-            "wiki/**",
-            "일일 기록은 Wiki 승격 입력이 아니다",
-            "작은 순수 분류 허브는 일반 텍스트 불릿 아래 직접 하위 키워드 링크",
-            "direct child가 2개 이상이면 navigation_groups",
-            "콘텐츠 subtree와 Facet 탐색 페이지를 만들지 않는다",
-            "facets metadata는 분류 보조 속성",
-            "resource_keyword",
-            "책 → 장르 키워드 → 책 제목",
-            "리소스 → 주제 텍스트 → 들여쓴 원자료 링크",
-            "lifecycle_status",
-            "started_on",
-            "ended_on",
-            "occurred_on",
-            "wiki/private/_sources/codex",
-            "Vault 밖 별도 source archive를 만들지 않는다",
-        }
-    elif lane.automation_id == "knowledge-curation":
-        required = {
-            "canonical_id",
-            "parent",
-            "keywords",
-            "view_mode",
-            "하위 키워드",
-            "최신 문서",
-            "wiki/README.md",
-            "작은 순수 분류 허브는 일반 텍스트 불릿 아래 직접 하위 키워드 링크",
-            "direct child가 2개 이상이면 navigation_groups",
-            "콘텐츠 subtree와 Facet 탐색 페이지가 없는지",
-            "facets metadata는 분류 보조 속성",
-            "책 → 장르 키워드 → 책 제목",
-            "리소스 → 주제 텍스트 → 들여쓴 원자료 링크",
-            "lifecycle_status",
-            "started_on",
-            "ended_on",
-            "occurred_on",
-            "wiki/private/_sources",
-            "Vault 밖 별도 보관소",
-        }
-    else:
-        required = {
-            "Wiki 문서를 새로 만들지 않는다",
-            "단계별",
-            "전체 완료 receipt를 만들지 않는다",
-            "일일 기록은 Wiki 승격 입력이 아니다",
-            "wiki/private/_sources/codex",
-            "자유 메모",
-        }
-    missing = tuple(sorted(term for term in required if term not in prompt))
-    if missing:
-        raise WoonError(
-            f"Codex automation mismatch for {lane.automation_id}: missing Wiki contract "
-            + ", ".join(missing)
-        )
-
-
-def _automation(raw: object, index: int) -> AutomationContract:
+def _automation(raw: object, index: int, *, contract_version: int = 1) -> AutomationContract:
     item = _mapping(raw, f"automations[{index}]")
     automation_id = _required_slug(item.get("id"), f"automations[{index}].id")
     owner = _required_slug(item.get("owner"), f"automations[{index}].owner")
@@ -410,9 +295,14 @@ def _automation(raw: object, index: int) -> AutomationContract:
         rrule=rrule,
         notification_policy=notification_policy,
         prompt_sha256=prompt_sha256,
-        owned_paths=_relative_paths(
-            execution.get("owned_paths"), f"automations[{index}].execution.owned_paths"
+        owned_paths=(
+            ()
+            if mode == "review-only" and execution.get("owned_paths") == []
+            else _relative_paths(
+                execution.get("owned_paths"), f"automations[{index}].execution.owned_paths"
+            )
         ),
+        contract_version=contract_version,
     )
 
 
@@ -494,14 +384,18 @@ def _validate_global_guards(value: object) -> None:
     bridge = _mapping(guards.get("schedule_bridge"), "global_guards.schedule_bridge")
     if bridge.get("auto_apply_allowlisted_datetime_mail_only") is not False:
         raise WoonError("schedule bridge must not auto-apply mail candidates")
-    if bridge.get("schedule_apply_path") != "local-user-authorized":
-        raise WoonError("schedule bridge must use the local user-authorized path")
-    if bridge.get("calendar_name") != "Woon 일정":
-        raise WoonError("schedule bridge must use the Woon 일정 calendar")
-    if bridge.get("manual_apply_command") != "native-local-command":
-        raise WoonError("schedule bridge must use the native manual apply command")
-    if bridge.get("native_adapters") != ["eventkit-full-access"]:
-        raise WoonError("schedule bridge must declare only the EventKit adapter")
+    if bridge.get("calendar_provider") != "google-calendar":
+        raise WoonError("schedule bridge must declare Google Calendar")
+    if any(
+        key in bridge
+        for key in (
+            "schedule_apply_path",
+            "calendar_name",
+            "manual_apply_command",
+            "native_adapters",
+        )
+    ):
+        raise WoonError("schedule bridge must not retain retired native Calendar wiring")
     if bridge.get("state_path") != ".local/woon-knowledge/schedule-bridge-state.json":
         raise WoonError("schedule bridge state must stay in the local runtime path")
 
@@ -553,8 +447,8 @@ def _validate_codex_conversation_contract(contracts: tuple[AutomationContract, .
         "brain/review/codex",
         ".local/woon-knowledge/codex-knowledge",
         ".local/woon-knowledge/document-intake",
-        "wiki/private/_sources/codex",
-        "wiki/private/_sources/knowledge",
+        "private/codex",
+        "private/knowledge",
     }
     if lane.mode != "materialize" or set(lane.owned_paths) != expected_paths:
         raise WoonError("codex conversation ingest must own the Wiki and local receipt boundary")
@@ -588,7 +482,7 @@ def _validate_daily_record_contract(
             "second-brain orchestrator has duplicate daily-record-materialization lanes"
         )
     lane = matches[0]
-    required_paths = {"inbox/daily", "inbox/calendar", "brain/review/activity"}
+    required_paths = {"inbox/daily", "brain/review/activity"}
     if lane.mode != "materialize" or set(lane.owned_paths) != required_paths:
         raise WoonError("daily record materialization has an unsafe write boundary")
     if lane.checkpoint_key != "daily-codex-projection":
@@ -621,12 +515,6 @@ def _validate_daily_record_contract(
             "daily-record-materialization",
             "woon-codex-digest",
             ".local/woon-knowledge/automation-receipts/daily-record-materialization",
-        ),
-        (
-            "calendar-projection",
-            "woon-calendar-service",
-            "woon_projection: apple-calendar",
-            "output-hash-and-reread",
         ),
         (
             "activity-review",

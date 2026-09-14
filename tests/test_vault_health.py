@@ -5,12 +5,17 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
+
+from test_graph_colors import color_tree
+
+from woon_core.knowledge.graph_colors import derive_graph_colors
 
 MODULE_PATH = (
     Path(__file__).parents[1] / "src/woon_core/knowledge/vault_tools/audit-vault-health.py"
@@ -47,6 +52,107 @@ class CanonicalWikiLinkTests(unittest.TestCase):
 
             self.assertEqual(broken, ["wiki/personal/person.md -> wiki/missing"])
             self.assertEqual(ambiguous, [])
+
+
+class RawSourceLayoutTests(unittest.TestCase):
+    def test_legacy_layout_still_excludes_raw_sources_from_human_markdown_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            page = root / "wiki/example.md"
+            raw = root / "wiki/private/_sources/knowledge/raw.md"
+            novel_root = root / "wiki/private/_sources/novel"
+            receipt = root / ".local/woon-knowledge/source-boundary-migration/manifest.json"
+            page.parent.mkdir(parents=True)
+            raw.parent.mkdir(parents=True)
+            novel_root.mkdir(parents=True)
+            receipt.parent.mkdir(parents=True)
+            page.write_text("# Example\n", encoding="utf-8")
+            raw.write_text("# Raw evidence\n", encoding="utf-8")
+            receipt.write_text(
+                json.dumps(
+                    {
+                        "destinations": [
+                            "wiki/private/_sources/knowledge",
+                            "wiki/private/_sources/novel",
+                        ],
+                        "files": [{}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(AUDIT, "VAULT", root):
+                self.assertEqual(
+                    AUDIT.raw_source_roots(root),
+                    (Path("wiki/private/_sources"),),
+                )
+                self.assertEqual(AUDIT.iter_markdown(), [page])
+                self.assertEqual(AUDIT.obsidian_ignored_paths(root), AUDIT.OBSIDIAN_IGNORED_PATHS)
+                self.assertEqual(AUDIT.raw_source_layout_issues(root), [])
+
+    def test_target_layout_accepts_private_and_web_raw_catalog_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subject = root / "wiki/example.md"
+            private_index = root / "private/knowledge/local-only/example/README.md"
+            private_data = root / "private/knowledge/local-only/example/data.txt"
+            web_source = root / "sources/knowledge/web/example.md"
+            for path in (subject, private_index, private_data, web_source):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            private_index.write_text("# 원자료\n", encoding="utf-8")
+            private_data.write_text("evidence\n", encoding="utf-8")
+            web_source.write_text("# Web source\n", encoding="utf-8")
+            subject.write_text(
+                "# Example\n\n"
+                "[[private/knowledge/local-only/example/README|원자료]]\n"
+                "[[sources/knowledge/web/example|웹 자료]]\n",
+                encoding="utf-8",
+            )
+            catalog = root / "catalog/sources/example.yaml"
+            catalog.parent.mkdir(parents=True)
+            catalog.write_text(
+                "version: 1\nsource: example\nwiki_subject: wiki/example.md\nrecords:\n"
+                "- state: canonical\n"
+                "  target: private/knowledge/local-only/example/README.md\n"
+                f"  target_sha256: {hashlib.sha256(private_index.read_bytes()).hexdigest()}\n"
+                "- state: canonical\n"
+                "  target: private/knowledge/local-only/example/data.txt\n"
+                f"  target_sha256: {hashlib.sha256(private_data.read_bytes()).hexdigest()}\n"
+                "- state: canonical\n"
+                "  target: sources/knowledge/web/example.md\n"
+                f"  target_sha256: {hashlib.sha256(web_source.read_bytes()).hexdigest()}\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(AUDIT.raw_source_layout_issues(root), [])
+            self.assertEqual(AUDIT.source_catalog_boundary_issues(root), [])
+            self.assertEqual(
+                AUDIT.obsidian_ignored_paths(root),
+                (
+                    *AUDIT.OBSIDIAN_COMMON_IGNORED_PATHS,
+                    "sources/knowledge/web/",
+                    "private/knowledge/",
+                    "private/novel/",
+                    "private/codex/",
+                    "private/legacy-wiki/",
+                ),
+            )
+
+    def test_mixed_raw_source_layout_is_rejected_but_all_raw_roots_stay_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "wiki/private/_sources/knowledge/raw.md"
+            target = root / "private/knowledge/raw.md"
+            for path in (legacy, target):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# Raw\n", encoding="utf-8")
+
+            self.assertEqual(
+                AUDIT.raw_source_layout_issues(root),
+                ["raw source layout is mixed; complete source-restructure before auditing"],
+            )
+            self.assertTrue(AUDIT.is_raw_source_path(legacy, root))
+            self.assertTrue(AUDIT.is_raw_source_path(target, root))
 
 
 class SourceCatalogBoundaryTests(unittest.TestCase):
@@ -517,6 +623,15 @@ class RetiredExternalVideoBoundaryTests(unittest.TestCase):
 
 
 class ObsidianGraphColorPolicyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.vault = Path(temporary.name)
+        for name, metadata in color_tree().items():
+            path = self.vault / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("---\n" + json.dumps(metadata) + "\n---\n", encoding="utf-8")
+
     def _valid_config(self) -> dict[str, object]:
         return {
             "search": AUDIT.OBSIDIAN_GRAPH_FILTER,
@@ -525,36 +640,31 @@ class ObsidianGraphColorPolicyTests(unittest.TestCase):
             "showTags": False,
             "showOrphans": False,
             "scale": AUDIT.OBSIDIAN_GRAPH_OVERVIEW_SCALE,
-            "colorGroups": [
-                {"query": query, "color": {"a": 1, "rgb": rgb}}
-                for _kind, query, rgb in AUDIT.OBSIDIAN_GRAPH_COLOR_GROUPS
-            ],
+            "colorGroups": derive_graph_colors(color_tree())["colorGroups"],
         }
 
-    def test_accepts_exclusive_semantic_color_priority(self) -> None:
-        config = self._valid_config()
-
-        self.assertEqual(AUDIT.obsidian_graph_config_issues(config), [])
-        color_groups = config["colorGroups"]
-        self.assertIsInstance(color_groups, list)
-        self.assertFalse(
-            any(" OR " in str(group["query"]) for group in color_groups if isinstance(group, dict))
+    def test_accepts_parent_derived_color_priority(self) -> None:
+        self.assertEqual(
+            AUDIT.obsidian_graph_config_issues(self._valid_config(), vault=self.vault), []
         )
 
-    def test_rejects_empty_filter_and_boolean_or_group(self) -> None:
+    def test_user_zoom_does_not_change_the_privacy_policy(self) -> None:
+        config = self._valid_config()
+        config["scale"] = 0.85
+        self.assertEqual(AUDIT.obsidian_graph_config_issues(config, vault=self.vault), [])
+        config["scale"] = -1
+        self.assertIn(
+            "overview scale must be a positive finite number",
+            AUDIT.obsidian_graph_config_issues(config, vault=self.vault),
+        )
+
+    def test_checks_color_drift_separately_from_the_search_policy(self) -> None:
         config = self._valid_config()
         config["search"] = ""
-        config["colorGroups"] = [
-            {
-                "query": "path:wiki ([node_kind:topic] OR [node_kind:detail])",
-                "color": {"a": 1, "rgb": 4676924},
-            }
-        ]
-
-        issues = AUDIT.obsidian_graph_config_issues(config)
-
+        config["colorGroups"] = []
+        issues = AUDIT.obsidian_graph_config_issues(config, vault=self.vault)
         self.assertTrue(any("search must be" in issue for issue in issues))
-        self.assertTrue(any("must not use boolean OR" in issue for issue in issues))
+        self.assertTrue(any("parent-derived color projection" in issue for issue in issues))
 
 
 class GlobalGraphRootTests(unittest.TestCase):
@@ -818,6 +928,34 @@ class CareerSourceAssetTests(unittest.TestCase):
                 self.assertTrue(AUDIT.is_allowed_non_markdown_file(jd))
             finally:
                 AUDIT.VAULT = previous
+
+
+class HomeNavigationTests(unittest.TestCase):
+    def test_keeps_developer_entry_and_user_labels_without_requiring_overall_wiki(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            vault = Path(directory)
+            home = vault / "brain/home.md"
+            home.parent.mkdir()
+            text = (
+                "# Home\n\n## 빠른 이동\n\n"
+                "- [[../wiki/Wiki/developer-wiki|개발 Wiki]]\n"
+                "- [[../wiki/personal/projects/README.md|프로젝트]]\n"
+                "- [[../wiki/people/README|인물]]\n\n"
+                "## 오늘의 할 일\n\n- [x] 사용자 완료 기록\n"
+                "![[../inbox/inbox-review.base#검토 대기]]\n"
+                "![[../inbox/daily/daily.base#일일 이력]]\n"
+            )
+            home.write_text(text, encoding="utf-8")
+            self.assertEqual(AUDIT.home_navigation_issues(vault), [])
+            for change in (
+                text.replace("## 빠른 이동\n", "## 빠른 이동\n- [[../wiki/README|전체 Wiki]]\n"),
+                text.replace("../wiki/Wiki/developer-wiki", "../wiki/README"),
+            ):
+                home.write_text(change, encoding="utf-8")
+                with self.subTest(menu=change):
+                    issues = AUDIT.home_navigation_issues(vault)
+                    self.assertTrue(any("second overall Wiki entry" in issue for issue in issues))
+                    self.assertEqual(home.read_text(encoding="utf-8"), change)
 
 
 class ObsidianWorkspaceTests(unittest.TestCase):
@@ -1106,153 +1244,61 @@ class DailyDigestProjectionTests(unittest.TestCase):
             self.assertTrue(any("retired duplicate daily digest file" in issue for issue in issues))
 
 
-class CalendarProjectionHealthTests(unittest.TestCase):
-    def test_marks_calendar_markdown_as_non_knowledge_projection(self) -> None:
+class LegacyCalendarArtifactHealthTests(unittest.TestCase):
+    def test_preserves_legacy_notes_without_requiring_a_dashboard_or_source_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            projection = root / "inbox/calendar/events/2026-08-18-example.md"
-            projection.parent.mkdir(parents=True)
-            projection.write_text("# 일정\n", encoding="utf-8")
-
-            with mock.patch.object(AUDIT, "VAULT", root):
-                self.assertTrue(AUDIT.is_calendar_projection_markdown(projection))
-
-    def test_accepts_core_owned_read_only_markdown_and_ics_projections(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            events = root / "inbox/calendar/events"
-            events.mkdir(parents=True)
-            event = events / "2026-08-18-example.md"
+            event = root / "inbox/calendar/events/existing.md"
+            event.parent.mkdir(parents=True)
             event.write_text(
-                """---
-type: calendar-event
-title: 일정
-publish: false
-access: local-only
-status: Generated
-source: apple-calendar-readonly
-calendar: Woon 일정
-Date: 2026-08-18
-Category: 기타
-Category ID: other
-Start Date: 2026-08-18T13:00:00+09:00
-End Date: 2026-08-18T14:00:00+09:00
-All Day: false
-woon_projection: apple-calendar
----
-""",
+                "---\nwoon_projection: apple-calendar\n---\n# Preserved event\n",
                 encoding="utf-8",
             )
             event.chmod(0o400)
-            events.chmod(0o500)
-            ics = root / AUDIT.CALENDAR_ICS_PROJECTION_PATH
-            ics.write_text(
-                "BEGIN:VCALENDAR\r\n"
-                "PRODID:-//Woon//Apple Calendar Read-only Projection//KO\r\n"
-                "END:VCALENDAR\r\n",
-                encoding="utf-8",
-            )
-            ics.chmod(0o400)
-            dashboard = root / AUDIT.CALENDAR_DASHBOARD_PROJECTION_PATH
-            dashboard.write_text(
-                """---
-type: calendar-dashboard
-title: Apple Calendar
-publish: false
-access: local-only
-status: Generated
-source: apple-calendar-readonly
-woon_projection: apple-calendar-dashboard
-cssclasses: link-calendar-dashboard
----
+            before = event.read_bytes()
 
-```link-calendar
-profile: woon-apple-calendar
-```
-""",
-                encoding="utf-8",
-            )
-            dashboard.chmod(0o400)
+            self.assertEqual(AUDIT.legacy_calendar_artifact_issues(root), [])
+            self.assertEqual(event.read_bytes(), before)
+            self.assertFalse((root / AUDIT.CALENDAR_DASHBOARD_PROJECTION_PATH).exists())
+            with mock.patch.object(AUDIT, "VAULT", root):
+                self.assertIn(event, AUDIT.iter_markdown())
 
-            self.assertEqual(AUDIT.calendar_projection_issues(root), [])
+    def test_does_not_impose_apple_projection_fields_on_other_calendar_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            note = root / "inbox/calendar/events/google-note.md"
+            note.parent.mkdir(parents=True)
+            note.write_text("---\ntitle: Google event\n---\n# Google event\n")
 
-    def test_rejects_calendar_projection_symlinks_outside_the_vault(self) -> None:
+            self.assertEqual(AUDIT.legacy_calendar_artifact_issues(root), [])
+
+    def test_rejects_retained_calendar_symlink_without_following_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "vault"
-            outside = Path(directory) / "outside"
-            outside.mkdir()
-            events = root / "inbox/calendar/events"
-            events.parent.mkdir(parents=True)
-            events.symlink_to(outside, target_is_directory=True)
-            dashboard_target = Path(directory) / "outside-dashboard.md"
-            dashboard_target.write_text(
-                "---\nwoon_projection: apple-calendar-dashboard\n---\n", encoding="utf-8"
-            )
-            dashboard = root / AUDIT.CALENDAR_DASHBOARD_PROJECTION_PATH
-            dashboard.symlink_to(dashboard_target)
+            target = Path(directory) / "outside.md"
+            target.write_text("private source", encoding="utf-8")
+            link = root / AUDIT.CALENDAR_DASHBOARD_PROJECTION_PATH
+            link.parent.mkdir(parents=True)
+            link.symlink_to(target)
 
-            issues = AUDIT.calendar_projection_issues(root)
+            issues = AUDIT.legacy_calendar_artifact_issues(root)
 
-            self.assertTrue(any("directory must be Vault-local" in issue for issue in issues))
-            self.assertTrue(
-                any("dashboard must be a Vault-local file" in issue for issue in issues)
-            )
+            self.assertEqual(len(issues), 1)
+            self.assertIn("must be a Vault-local file", issues[0])
+            self.assertEqual(target.read_text(encoding="utf-8"), "private source")
 
-    def test_reports_dashboard_directory_instead_of_crashing(self) -> None:
+    def test_reports_changed_permissions_only_for_marked_legacy_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dashboard = root / AUDIT.CALENDAR_DASHBOARD_PROJECTION_PATH
-            dashboard.mkdir(parents=True)
+            note = root / "inbox/calendar/events/existing.md"
+            note.parent.mkdir(parents=True)
+            note.write_text("---\nwoon_projection: apple-calendar\n---\n")
+            note.chmod(0o600)
 
-            issues = AUDIT.calendar_projection_issues(root)
+            issues = AUDIT.legacy_calendar_artifact_issues(root)
 
-            self.assertTrue(
-                any("dashboard must be a Vault-local file" in issue for issue in issues)
-            )
-
-    def test_reports_unreadable_dashboard_instead_of_crashing(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            dashboard = root / AUDIT.CALENDAR_DASHBOARD_PROJECTION_PATH
-            dashboard.parent.mkdir(parents=True)
-            dashboard.write_text("---\nwoon_projection: apple-calendar-dashboard\n---\n")
-
-            with mock.patch.object(Path, "read_text", side_effect=OSError("unreadable")):
-                issues = AUDIT.calendar_projection_issues(root)
-
-            self.assertTrue(any("dashboard must be readable" in issue for issue in issues))
-
-    def test_rejects_calendar_event_symlink_outside_the_vault(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "vault"
-            events = root / "inbox/calendar/events"
-            events.mkdir(parents=True)
-            outside_event = Path(directory) / "outside-event.md"
-            outside_event.write_text(
-                "---\nwoon_projection: apple-calendar\n---\n", encoding="utf-8"
-            )
-            (events / "linked.md").symlink_to(outside_event)
-            events.chmod(0o500)
-
-            issues = AUDIT.calendar_projection_issues(root)
-
-            self.assertTrue(
-                any("calendar projection must be a Vault-local file" in issue for issue in issues)
-            )
-
-    def test_rejects_writable_or_retired_prisma_calendar_projection_files(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            events = root / "inbox/calendar/events"
-            events.mkdir(parents=True)
-            (events / ".prisma-virtual-events.md").write_text(
-                "```prisma-virtual-events\n[{}]\n```\n", encoding="utf-8"
-            )
-
-            issues = AUDIT.calendar_projection_issues(root)
-
-            self.assertTrue(any("directory must be read-only" in issue for issue in issues))
-            self.assertTrue(any("retired Prisma support file" in issue for issue in issues))
+            self.assertEqual(len(issues), 1)
+            self.assertIn("must remain read-only", issues[0])
 
 
 class RetiredAiInstructionBoundaryTests(unittest.TestCase):

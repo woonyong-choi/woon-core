@@ -59,7 +59,7 @@ _INPUT_STATES = {
     "unavailable",
     "source-only",
 }
-_DIGEST_RENDER_REVISION = "29"
+_DIGEST_RENDER_REVISION = "31"
 _DAILY_ENTRY_LIMIT = 256
 _VISIBLE_LIMIT = 900
 _TITLE_LIMIT = 80
@@ -83,7 +83,7 @@ _KEYWORD_CANDIDATES = (
     "Codex",
     "Claude",
     "Herdr",
-    "Apple Calendar",
+    "Google Calendar",
     "Link Calendar",
     "Linked Graph",
     "AICE",
@@ -188,10 +188,16 @@ def record_codex_daily_digest(
     )
     if contract is None or contract.mode != "materialize" or contract.status != "enabled":
         raise WoonError("daily record materialization automation is not enabled")
-    if set(contract.owned_paths) != {"inbox/daily", "inbox/calendar", "brain/review/activity"}:
+    if set(contract.owned_paths) != {"inbox/daily", "brain/review/activity"}:
         raise WoonError("daily record materialization has an unsafe write boundary")
     _validate_entries(settings.vault, entries, input_state=input_state)
     canonical_entries = tuple(entry for entry in entries if entry.related_documents)
+    if input_state in {"pending", "unavailable", "source-only"} or (
+        input_state == "partial" and not canonical_entries
+    ):
+        # Missing inputs and unfinished promotion are operational state, not a
+        # lived event. In particular, never advance a successful day checkpoint.
+        raise WoonError(f"daily digest input is {input_state}; preserve its pending state")
     # A processed legacy ledger can contain operational one-off records that
     # were explicitly marked ``wiki_update=false``. Those records remain in
     # local evidence, but their existence must not turn the human Daily into a
@@ -199,8 +205,6 @@ def record_codex_daily_digest(
     # incomplete-promotion state written by the ingestion lane.
     rendered_input_state = input_state
     source_bundles = load_codex_source_bundles(settings.vault, day=day)
-    if input_state == "source-only" and not source_bundles:
-        raise WoonError("source-only daily record requires local conversation evidence")
     payload = {
         "render_revision": _DIGEST_RENDER_REVISION,
         "day": day.isoformat(),
@@ -224,10 +228,7 @@ def record_codex_daily_digest(
         cursor_after=token,
     )
     destination = settings.vault / "inbox" / "daily" / f"{day.isoformat()}.md"
-    suppress_empty_record = not canonical_entries and rendered_input_state in {
-        "processed",
-        "no-meaningful",
-    }
+    suppress_empty_record = not canonical_entries
     content = (
         ""
         if suppress_empty_record
@@ -539,11 +540,9 @@ def _render_daily_block(
     input_state: str,
     source_bundles: tuple[dict[str, object], ...] = (),
 ) -> str:
-    status_title, status_message = _daily_status(input_state=input_state, entry_count=len(entries))
     lines = [
         "<!-- woon-codex-digest:start -->",
         "",
-        f"**{status_title}** — {status_message}",
     ]
     if not entries and not source_bundles:
         lines.extend(
@@ -555,7 +554,6 @@ def _render_daily_block(
         )
         return "\n".join(lines)
     if entries:
-        lines.extend(["", "## 정본 변경", ""])
         subjects = tuple(
             _combine_subject_entries(vault, same_subject)
             for same_subject in _group_section_entries(vault, list(entries))
@@ -633,7 +631,13 @@ def _normalize_daily_shell(note: str) -> str:
     """Remove only retired empty boilerplate while preserving personal text."""
 
     normalized = note.replace("\n\ud558\ub8e8 \uc870\uac01 \uc815\ub9ac \ub300\uae30.\n", "\n")
-    for heading in ("오늘의 초점", "포착", "질문", "만든 문서"):
+    normalized = re.sub(
+        r"(?:\n## 오늘의 할 일\s*\n)?[ \t]*<!-- woon-tasks:start -->\s*"
+        r"<!-- woon-tasks:end -->",
+        "",
+        normalized,
+    )
+    for heading in ("오늘의 초점", "포착", "질문", "만든 문서", "자유 메모"):
         pattern = rf"\n## {re.escape(heading)}\n(?P<body>.*?)(?=\n## |\n<!-- |\Z)"
 
         def remove_if_empty(match: re.Match[str]) -> str:
@@ -654,18 +658,6 @@ def _normalize_daily_shell(note: str) -> str:
         normalized,
         flags=re.DOTALL,
     )
-    if "<!-- woon-tasks:start -->" not in normalized:
-        heading_end = re.search(r"^# .+?\n", normalized, flags=re.MULTILINE)
-        if heading_end is None:
-            raise WoonError("daily note heading is missing")
-        task_block = (
-            "\n## \uc624\ub298\uc758 \ud560 \uc77c\n\n"
-            "<!-- woon-tasks:start -->\n"
-            "<!-- woon-tasks:end -->\n"
-        )
-        normalized = normalized[: heading_end.end()] + task_block + normalized[heading_end.end() :]
-    if "## \uc790\uc720 \uba54\ubaa8" not in normalized:
-        normalized = normalized.rstrip() + "\n\n## \uc790\uc720 \uba54\ubaa8\n"
     return re.sub(r"\n{4,}", "\n\n\n", normalized).rstrip() + "\n"
 
 
@@ -707,8 +699,6 @@ def _update_daily_metadata(
             _daily_metadata_summary(vault, entries, input_state=input_state),
             ensure_ascii=False,
         ),
-        "digest_status: "
-        + json.dumps(_daily_status_label(entries, input_state=input_state), ensure_ascii=False),
         "keywords:",
     ]
     metadata.extend(
@@ -752,48 +742,6 @@ def _legacy_digest_block(content: str, *, day: date) -> str:
     if not body.startswith("## 대화에서 남긴 것\n"):
         raise WoonError("legacy daily digest body is not generated")
     return f"{marker_start}\n\n{body}\n\n{marker_end}\n"
-
-
-def _daily_status(*, input_state: str, entry_count: int) -> tuple[str, str]:
-    """Render a human-readable state without making an empty note look done."""
-
-    if input_state == "partial":
-        return (
-            "현재까지 정리됨",
-            "오늘은 아직 진행 중이다. 지금까지 확인된 정본 변경만 먼저 연결했다.",
-        )
-    if input_state == "source-only":
-        return (
-            "정본 반영 필요",
-            "원문은 로컬 증거로 보존했지만 Wiki에 반영할 내용을 아직 확정하지 못했다.",
-        )
-    if entry_count:
-        return "정본 반영 완료", "이날 갱신된 내용을 주제별 정본 문서에 연결했다."
-    messages = {
-        "processed": (
-            "남길 항목 없음",
-            "대화를 읽었지만 오늘의 이력·학습·일정·인물·자료로 남길 최소 항목은 없었습니다.",
-        ),
-        "no-meaningful": (
-            "남길 항목 없음",
-            "대화를 읽었지만 재사용하거나 하루 이력으로 남길 항목은 없었습니다.",
-        ),
-        "pending": (
-            "다음 실행 대기",
-            "오늘의 Codex 대화가 아직 안전하게 읽을 수 있는 저장 상태가 아니어서 "
-            "다음 실행에서 다시 확인합니다.",
-        ),
-        "unavailable": (
-            "세션 원본을 찾지 못해 대기",
-            "이 날짜의 Codex 세션 원본을 현재 기기에서 찾지 못해 자동 대화 정리를 "
-            "만들지 못했습니다.",
-        ),
-        "source-only": (
-            "정본 반영 필요",
-            "원문은 보존했지만 Wiki 정본 반영은 아직 완료되지 않았습니다.",
-        ),
-    }
-    return messages[input_state]
 
 
 def _person_names(records: list[dict[str, object]]) -> tuple[str, ...]:
@@ -887,8 +835,8 @@ def _render_entry(
         if primary_document is not None
         else display_title
     )
-    lines = [f"### {heading}"]
-    lines.extend(["", entry.summary])
+    lines = [f"## {heading}"]
+    lines.extend(["", f"- {entry.summary}"])
     if supporting_documents:
         links = tuple(_related_document_link(vault, path) for path in supporting_documents)
         lines.extend(["", "**변경 문서**"])
@@ -1046,34 +994,13 @@ def _daily_metadata_summary(
                 break
             selected.append(title)
         return " · ".join(selected)
-    return {
-        "processed": "확인한 대화에서 남길 기록이 없었다.",
-        "no-meaningful": "확인한 대화에서 남길 기록이 없었다.",
-        "partial": "오늘 대화를 정리하는 중이다.",
-        "pending": "다음 자동 정리를 기다리는 중이다.",
-        "unavailable": "이 날짜의 Codex 세션 원본을 찾지 못했다.",
-        "source-only": "원문은 보존했지만 Wiki 정본 반영은 아직 완료되지 않았다.",
-    }[input_state]
+    return ""
 
 
 def _daily_display_title(value: str) -> str:
     """Keep historical meaning while using the current human-facing Wiki name."""
 
     return re.sub(r"(?i)\b(?:Woon\s+Wiki|WIKI)\b", "Wiki", value).strip()
-
-
-def _daily_status_label(entries: tuple[CodexDailyDigestEntry, ...], *, input_state: str) -> str:
-    if input_state == "partial":
-        return "진행 중"
-    if entries:
-        return "정본 반영 완료"
-    return {
-        "processed": "남길 항목 없음",
-        "no-meaningful": "남길 항목 없음",
-        "pending": "다음 실행 대기",
-        "unavailable": "원본 확인 필요",
-        "source-only": "정본 반영 필요",
-    }[input_state]
 
 
 def _daily_keywords(entries: tuple[CodexDailyDigestEntry, ...]) -> tuple[str, ...]:

@@ -38,7 +38,7 @@ from woon_core.knowledge.ollama_quality_review import (
     _validate_result,
 )
 
-REVISION_VERSION = 1
+REVISION_VERSION = 2
 RUN_MANIFEST_FILE = "run-manifest.json"
 DEFAULT_TIMEOUT_SECONDS = 900
 DEFAULT_MAX_ATTEMPTS = 1
@@ -62,7 +62,34 @@ _WIKILINK = re.compile(r"\[\[[^\]\n]+]]")
 _MARKDOWN_LINK = re.compile(r"!?\[[^\]\n]*]\(([^)\n]+)\)")
 _INLINE_CODE = re.compile(r"(?<!`)`[^`\n]+`(?!`)")
 _H1 = re.compile(r"\A\s*#\s+", re.MULTILINE)
+_H2 = re.compile(r"(?m)^##\s+(.+?)\s*$")
 _KEEP_MARKER = re.compile(r"@@WOON_KEEP_[0-9]{3}@@")
+_QUOTED_ANCHOR = re.compile(r"“([^”\n]+)”")
+_GENERIC_H2 = frozenset(
+    {
+        "질문",
+        "실행",
+        "결과",
+        "해석",
+        "확장",
+        "정리",
+        "이어서 읽기",
+        "코드",
+        "개요",
+        "흐름",
+        "지도",
+        "확인",
+        "학습 순서",
+        "현재 학습 범위",
+        "통과 기준",
+    }
+)
+_GENERIC_H2_SUFFIXES = (" 코드", " 필요성", " 개요")
+_NARRATIVE_H2_CONNECTORS = ("에서 ", "할 ", "하는 ", "먼저 ")
+_NARRATIVE_H2_SUFFIXES = (" 방식", " 보기", " 방법", " 과정", " 순서")
+_GENERIC_SUMMARY_BLOCK = re.compile(
+    r"(?mi)^>\s*(?:한\s*줄\s*요약|요약|핵심\s*요약)\s*:[^\n]*(?:\n>[^\n]*)*(?:\n{1,2})?"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +140,9 @@ def create_codex_quality_revision_proposals(
     normalized_model = _model(model)
     _validate_timeout(timeout_seconds)
     _validate_attempts(max_attempts)
-    candidates, reviews_sha256 = _revision_candidates(vault, plan_path, reviews_dir)
+    candidates, reviews_sha256 = _revision_candidates(
+        vault, plan_path, reviews_dir, page_ids=page_ids
+    )
     candidates = _selected_candidates(candidates, page_ids)
     binary = _codex_binary(codex_binary)
     _require_chatgpt_login(binary)
@@ -178,7 +207,9 @@ def apply_codex_quality_revisions(
     page must still have exactly one valid proposal across all supplied runs.
     """
 
-    candidates, reviews_sha256 = _revision_candidates(vault, plan_path, reviews_dir)
+    candidates, reviews_sha256 = _revision_candidates(
+        vault, plan_path, reviews_dir, page_ids=page_ids
+    )
     if page_ids:
         requested = {_text(page_id, "Codex revision selected page_id") for page_id in page_ids}
         if len(requested) != len(page_ids):
@@ -189,7 +220,12 @@ def apply_codex_quality_revisions(
             raise WoonError(f"Codex revision selected page is not failed: {unknown[0]}")
         candidates = tuple(candidate for candidate in candidates if candidate.page_id in requested)
     proposal_records, proposal_sources = _collect_proposal_records(
-        candidates, proposals_dirs, plan_path, reviews_sha256, duplicate_policy
+        candidates,
+        proposals_dirs,
+        plan_path,
+        reviews_sha256,
+        duplicate_policy,
+        allow_unselected=bool(page_ids),
     )
     records: list[CuratedRevision] = []
     for candidate in candidates:
@@ -200,6 +236,7 @@ def apply_codex_quality_revisions(
                 body=_text(proposal.get("body"), "Codex revision body"),
                 statement=_text(proposal.get("statement"), "Codex revision statement"),
                 current_use=_text(proposal.get("current_use"), "Codex revision current_use"),
+                expected_revision=candidate.output_sha256,
             )
         )
     _, service = build_knowledge_service(vault.expanduser().resolve())
@@ -220,8 +257,15 @@ def _collect_proposal_records(
     plan_path: Path,
     reviews_sha256: str,
     duplicate_policy: str = "error",
+    *,
+    allow_unselected: bool = False,
 ) -> tuple[dict[str, dict[str, object]], dict[str, str]]:
-    """Load one proposal per candidate from one or more isolated run receipts."""
+    """Load one proposal per candidate from one or more isolated run receipts.
+
+    A partial apply may share a proposal directory with other pages that are
+    still being generated or were already promoted. Those unselected records
+    remain in their receipt but cannot affect this transaction.
+    """
 
     if not proposals_dirs:
         raise WoonError("at least one Codex revision proposal directory is required")
@@ -243,6 +287,8 @@ def _collect_proposal_records(
             page_id = _text(proposal.get("page_id"), "Codex revision page_id")
             candidate = expected.get(page_id)
             if candidate is None:
+                if allow_unselected:
+                    continue
                 raise WoonError(f"Codex revision proposal is not a failed page: {page_id}")
             if proposal_path.name != _proposal_file_name(page_id):
                 raise WoonError(f"Codex revision proposal has an invalid file name: {page_id}")
@@ -260,7 +306,11 @@ def _collect_proposal_records(
 
 
 def _revision_candidates(
-    vault: Path, plan_path: Path, reviews_dir: Path
+    vault: Path,
+    plan_path: Path,
+    reviews_dir: Path,
+    *,
+    page_ids: tuple[str, ...] = (),
 ) -> tuple[tuple[RevisionCandidate, ...], str]:
     plan = _load_plan(plan_path)
     plan_root = plan_path.expanduser().resolve().parent
@@ -271,6 +321,11 @@ def _revision_candidates(
     if run_manifest.get("plan_sha256") != _sha256_file(plan_path):
         raise WoonError("Codex quality review results belong to a different plan")
 
+    selected = (
+        {_text(page_id, "Codex revision selected page_id") for page_id in page_ids}
+        if page_ids
+        else None
+    )
     pages, curations = _catalog_pages(vault)
     candidates: list[RevisionCandidate] = []
     reviewed_files: list[Path] = []
@@ -301,6 +356,8 @@ def _revision_candidates(
             if review.get("verdict") != "needs-revision":
                 continue
             page_id = _text(review.get("page_id"), "Codex quality review page_id")
+            if selected is not None and page_id not in selected:
+                continue
             target = targets[page_id]
             page = pages.get(page_id)
             if page is None:
@@ -441,6 +498,21 @@ def _propose_revision(
     max_attempts: int,
 ) -> dict[str, object]:
     last_error: WoonError | None = None
+    if candidate.failures == ("revisitability",):
+        try:
+            return _propose_with_section_heading(candidate)
+        except WoonError as error:
+            last_error = error
+        try:
+            return _propose_with_heading_repair(
+                candidate,
+                binary,
+                model,
+                timeout_seconds,
+                last_error,
+            )
+        except WoonError as error:
+            last_error = error
     for attempt in range(1, max_attempts + 1):
         if candidate.failures == ("evidence_boundary",):
             raw = _run_codex(
@@ -450,14 +522,16 @@ def _propose_revision(
                 model,
                 timeout_seconds,
             )
-            proposal = _expand_evidence_scope(raw, candidate)
+            proposal = _proposal_without_generic_summary(_expand_evidence_scope(raw, candidate))
         else:
-            proposal = _run_codex(
-                _revision_prompt(candidate, last_error),
-                _revision_schema(),
-                binary,
-                model,
-                timeout_seconds,
+            proposal = _proposal_without_generic_summary(
+                _run_codex(
+                    _revision_prompt(candidate, last_error),
+                    _revision_schema(),
+                    binary,
+                    model,
+                    timeout_seconds,
+                )
             )
         try:
             _validate_proposal(proposal, candidate)
@@ -474,6 +548,13 @@ def _propose_revision(
             candidate, binary, model, timeout_seconds, last_error
         )
     except WoonError as error:
+        if "revisitability" in candidate.failures:
+            try:
+                return _propose_with_heading_repair(
+                    candidate, binary, model, timeout_seconds, error
+                )
+            except WoonError as heading_error:
+                error = heading_error
         try:
             return _propose_with_learning_scaffold(candidate, binary, model, timeout_seconds, error)
         except WoonError as scaffold_error:
@@ -509,6 +590,7 @@ def _propose_with_protected_template(
     proposal["body"] = _restore_protected_material(
         _text(raw.get("body"), "Codex revision body"), replacements
     )
+    proposal = _proposal_without_generic_summary(proposal)
     _validate_proposal(proposal, candidate)
     return proposal
 
@@ -532,12 +614,94 @@ def _propose_with_learning_scaffold(
     opening = _plain_learning_paragraph(raw.get("opening"), "Codex learning opening")
     revisit = _plain_learning_paragraph(raw.get("revisit"), "Codex learning revisit")
     proposal: dict[str, object] = {
-        "body": _add_learning_scaffold(candidate.body, opening, revisit),
+        "body": _add_learning_scaffold(
+            _body_without_generic_summary(candidate.body), opening, revisit
+        ),
         "statement": _text(raw.get("statement"), "Codex revision statement"),
         "current_use": _text(raw.get("current_use"), "Codex revision current_use"),
     }
     _validate_proposal(proposal, candidate)
     return proposal
+
+
+def _propose_with_heading_repair(
+    candidate: RevisionCandidate,
+    binary: str,
+    model: str,
+    timeout_seconds: int,
+    previous_error: WoonError,
+) -> dict[str, object]:
+    """Replace only the failed generic H2 while preserving all source bytes below it."""
+
+    anchor = _revisitability_anchor(candidate)
+    if anchor is None:
+        raise WoonError("Codex revision has no failed revisitability heading")
+    last_error = previous_error
+    for _attempt in range(3):
+        try:
+            raw = _run_codex(
+                _heading_repair_prompt(candidate, anchor, last_error),
+                _heading_repair_schema(),
+                binary,
+                model,
+                timeout_seconds,
+            )
+            heading = _text(raw.get("heading"), "Codex revision heading").strip()
+            if "\n" in heading or heading.startswith("#"):
+                raise WoonError("Codex revision heading must be plain single-line text")
+            pattern = re.compile(rf"(?m)^##\s+{re.escape(anchor)}\s*$")
+            body, replacements = pattern.subn(f"## {heading}", candidate.body, count=1)
+            if replacements != 1:
+                raise WoonError(
+                    "Codex revision could not replace the failed revisitability heading"
+                )
+            proposal: dict[str, object] = {
+                "body": _body_without_generic_summary(body),
+                "statement": _text(raw.get("statement"), "Codex revision statement"),
+                "current_use": _text(raw.get("current_use"), "Codex revision current_use"),
+            }
+            _validate_proposal(proposal, candidate)
+        except WoonError as error:
+            last_error = error
+        else:
+            return proposal
+    raise last_error
+
+
+def _propose_with_section_heading(candidate: RevisionCandidate) -> dict[str, object]:
+    """Promote a document's own immediate H3 when an H2-only repair is rejected."""
+
+    anchor = _revisitability_anchor(candidate)
+    if anchor is None:
+        raise WoonError("Codex revision has no failed revisitability heading")
+    match = re.search(rf"(?ms)^##\s+{re.escape(anchor)}\s*$.*?^###\s+(.+?)\s*$", candidate.body)
+    if match is None:
+        raise WoonError("Codex revision has no specific child heading to promote")
+    heading = _section_heading_keyword(match.group(1))
+    if _is_generic_h2(heading, candidate.title):
+        raise WoonError("Codex revision child heading is still generic")
+    pattern = re.compile(rf"(?m)^##\s+{re.escape(anchor)}\s*$")
+    body, replacements = pattern.subn(f"## {heading}", candidate.body, count=1)
+    if replacements != 1:
+        raise WoonError("Codex revision could not replace the failed revisitability heading")
+    proposal: dict[str, object] = {
+        "body": _body_without_generic_summary(body),
+        "statement": f"{candidate.title}의 핵심 구조를 구분한다.",
+        "current_use": candidate.purpose,
+    }
+    _validate_proposal(proposal, candidate)
+    return proposal
+
+
+def _section_heading_keyword(value: str) -> str:
+    """Turn an existing child heading into a compact parent keyword."""
+
+    heading = value.strip()
+    if " — " in heading:
+        before, after = (part.strip() for part in heading.split(" — ", maxsplit=1))
+        heading = after if re.fullmatch(r"[A-Za-z0-9 .:+#/_-]+", before) else before
+    heading = re.sub(r"^(?:.*?의\s+)?(.+?)\s*(?:으로|에서)\s*보기$", r"\1", heading)
+    return heading.strip()
 
 
 def _revision_prompt(candidate: RevisionCandidate, previous_error: WoonError | None) -> str:
@@ -548,6 +712,23 @@ def _revision_prompt(candidate: RevisionCandidate, previous_error: WoonError | N
 분명히 두고, 그 장면을 설명하는 이유와 용어를 필요한 순서로 연결한다. 문단 안에서는 주체와 대상,
 원인과 결과가 자연스럽게 이어져야 한다. "핵심은", "정리하면" 같은 표어로 문단을 시작하지 말고,
 입력에 없는 사례, 수치, 출처, 실행 결과, 확신, 링크를 만들지 마라.
+
+제목은 compiler가 소유하므로 바꾸지 않는다. H2는 이 문서에서 실제로 다루는 값·상태·동작·판단을
+짧게 붙인다. `질문`, `실행`, `결과`, `해석`, `확장`, `정리`, `이어서 읽기`나 제목을 되풀이한
+`… 코드`, `… 필요성`, `… 개요`를 고정 목차처럼 남기지 마라. 단지 단어를 다른 일반어로 바꾸지 말고,
+바로 아래 문단과 코드가 답하는 고유한 장면을 소제목으로 삼아라. 짧은 글은 H2를 억지로 늘리지
+않아도 된다.
+
+`PintOS 코드에서 먼저 …`, `…하는 방식`, `… 넓혀 보기`처럼 독자의 이동을 지시하는 문장형
+H2도 쓰지 마라. `구조체와 인자 배열`, `주소와 배열`, `스택과 주소 크기`처럼 대상만 남긴
+짧은 명사형 키워드를 고른다.
+
+`> 한 줄 요약:`처럼 모든 문서의 맨 앞에 같은 요약 표식을 반복하지 마라. 첫 문단은 이 문서가
+다루는 실제 장면이나 문제에서 바로 시작한다. 문서에 정말 필요한 인용문·주의사항·확인 범위는
+그 내용을 드러내는 문장으로 남길 수 있지만, 독자를 위해 만든 일반 요약 라벨은 쓰지 마라.
+
+`review_findings`에서 `revisitability` 실패가 인용한 실제 H2는 반드시 교체하거나 그 prose를
+인접 section에 합쳐 제거해야 한다. 인용된 H2를 그대로 둔 채 문장만 고치는 출력은 무효다.
 
 코드 펜스, Mermaid 펜스, 수식 펜스, URL, Markdown 링크, 위키링크, 인라인 code identifier는
 원문 그대로 남겨야 한다. compiler가 소유하는 frontmatter와 H1은 본문에 넣지 마라. 본문은 H2부터
@@ -568,7 +749,7 @@ INPUT DATA
         "current_use": candidate.purpose,
         "failed_criteria": list(candidate.failures),
         "review_findings": list(candidate.failure_reasons),
-        "body": candidate.body,
+        "body": _body_without_generic_summary(candidate.body),
     }
     if previous_error is not None:
         instructions += (
@@ -589,6 +770,11 @@ def _protected_revision_prompt(
 표식의 철자·개수·순서를 바꾸거나 새 표식을 만들지 마라. 표식 안에 있던 정보를 바깥 문장으로
 반복할 필요는 없다. 입력에 없는 사실·수치·출처·링크·실행 결과를 만들지 말고, 독자가 혼자
 공부하거나 동료에게 설명할 때 자연스럽게 이해하도록 장면·이유·용어를 필요한 순서로 연결하라.
+
+`revisitability` 실패가 인용한 H2는 표식 바깥에서 반드시 교체하거나 그 prose를 인접 section에
+합쳐 제거해야 한다. `정리`, `이어서 읽기`, 제목을 되풀이한 `… 코드`·`… 필요성`·`… 개요` 같은
+고정 표제와 `…하는 방식`, `…넓혀 보기` 같은 문장형 표제는 남기지 말고, 바로 아래 문단이
+다루는 고유한 장면을 짧은 명사형 키워드로 붙여라.
 
 `current_use`에는 이 수정본을 앞으로 어떤 질문·설명·판단에 다시 쓸지를 한 문장으로 적어라.
 과거 수집 의도나 입력에 없는 프로젝트를 만들지 마라. compiler가 소유하는 frontmatter와 H1은
@@ -630,6 +816,31 @@ INPUT DATA
         "failed_criteria": list(candidate.failures),
         "review_findings": list(candidate.failure_reasons),
         "body": candidate.body,
+        "previous_validation_error": str(previous_error),
+    }
+    return instructions + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _heading_repair_prompt(
+    candidate: RevisionCandidate, anchor: str, previous_error: WoonError
+) -> str:
+    instructions = """당신은 한국어 학습 Wiki를 다듬는 편집자다. 기존 본문의 H2 한 개만 바꾼다.
+문서의 실패한 H2를, 바로 아래 문단·목록·코드가 실제로 다루는 대상이 드러나는 짧은 명사형 키워드로
+교체하라. `정리`, `흐름`, `확인`, `코드`, `개요`, `…하는 방식`, `…할 때`처럼 어느 문서에나
+붙을 수 있는 말은 쓰지 마라. 문장을 만들지 말고, 예를 들어 `훈련셋과 검증셋`, `배치와 갱신 횟수`처럼
+대상만 남긴다. 입력에 없는 사실·수치·용어를 만들지 마라.
+
+출력의 `heading`만 H2에 반영된다. 따라서 H2 기호나 Markdown을 넣지 말고, `statement`와
+`current_use`도 한 줄씩 작성하라. 반드시 JSON schema에 맞는 객체만 출력하라.
+
+INPUT DATA
+"""
+    payload = {
+        "page_id": candidate.page_id,
+        "title": candidate.title,
+        "failed_heading": anchor,
+        "review_findings": list(candidate.failure_reasons),
+        "body": _body_without_generic_summary(candidate.body),
         "previous_validation_error": str(previous_error),
     }
     return instructions + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -684,6 +895,19 @@ def _learning_scaffold_schema() -> dict[str, object]:
         "properties": {
             "opening": {"type": "string", "minLength": 20, "maxLength": 600},
             "revisit": {"type": "string", "minLength": 20, "maxLength": 600},
+            "statement": {"type": "string", "minLength": 10, "maxLength": 360},
+            "current_use": {"type": "string", "minLength": 10, "maxLength": 240},
+        },
+    }
+
+
+def _heading_repair_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["heading", "statement", "current_use"],
+        "properties": {
+            "heading": {"type": "string", "minLength": 2, "maxLength": 80},
             "statement": {"type": "string", "minLength": 10, "maxLength": 360},
             "current_use": {"type": "string", "minLength": 10, "maxLength": 240},
         },
@@ -829,10 +1053,83 @@ def _validate_proposal(value: dict[str, object], candidate: RevisionCandidate) -
         raise WoonError("Codex revision removed a Markdown link")
     if not _preserves(_INLINE_CODE, candidate.body, body):
         raise WoonError("Codex revision removed an inline code identifier")
+    if _GENERIC_SUMMARY_BLOCK.search(body):
+        raise WoonError("Codex revision retained a generic leading summary block")
+    _validate_revisitability_headings(candidate, body)
     if "\n" in statement or not statement.strip():
         raise WoonError("Codex revision statement must be one non-empty line")
     if "\n" in current_use or not current_use.strip():
         raise WoonError("Codex revision current_use must be one non-empty line")
+
+
+def _body_without_generic_summary(body: str) -> str:
+    """Remove only a repeated editorial summary label before drafting new prose.
+
+    A generic leading summary is a discarded presentation aid, not protected
+    source material.  Hiding it from the writer prevents it from being copied
+    back into every reader-facing page; fenced blocks, links, and all other
+    source text remain available for preservation checks.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        summary = match.group(0)
+        protected = (_FENCED_BLOCK, _WIKILINK, _MARKDOWN_LINK, _INLINE_CODE)
+        if not any(pattern.search(summary) for pattern in protected):
+            return ""
+        lines = [re.sub(r"^>\s?", "", line) for line in summary.splitlines()]
+        lines[0] = re.sub(r"^(?:한\s*줄\s*요약|요약|핵심\s*요약)\s*:\s*", "", lines[0], flags=re.I)
+        return "\n".join(lines).strip() + "\n\n"
+
+    return _GENERIC_SUMMARY_BLOCK.sub(replace, body).lstrip("\n")
+
+
+def _proposal_without_generic_summary(proposal: dict[str, object]) -> dict[str, object]:
+    """Discard a model-created repeated summary label before validation."""
+
+    body = proposal.get("body")
+    if not isinstance(body, str):
+        return proposal
+    normalized = dict(proposal)
+    normalized["body"] = _body_without_generic_summary(body)
+    return normalized
+
+
+def _validate_revisitability_headings(candidate: RevisionCandidate, body: str) -> None:
+    """Reject a prose-only edit when the review identified a heading failure."""
+
+    if "revisitability" not in candidate.failures:
+        return
+    revised_headings = _h2_headings(body)
+    original_headings = set(_h2_headings(candidate.body))
+    failed_anchor = _revisitability_anchor(candidate)
+    if failed_anchor in original_headings and failed_anchor in revised_headings:
+        raise WoonError("Codex revision left the failed revisitability heading unchanged")
+    for heading in revised_headings:
+        if _is_generic_h2(heading, candidate.title):
+            raise WoonError("Codex revision left a generic revisitability heading")
+
+
+def _revisitability_anchor(candidate: RevisionCandidate) -> str | None:
+    for criterion, reason in zip(candidate.failures, candidate.failure_reasons, strict=True):
+        if criterion != "revisitability":
+            continue
+        match = _QUOTED_ANCHOR.search(reason)
+        return match.group(1).strip() if match is not None else None
+    return None
+
+
+def _h2_headings(body: str) -> tuple[str, ...]:
+    return tuple(match.group(1).strip() for match in _H2.finditer(body))
+
+
+def _is_generic_h2(heading: str, title: str) -> bool:
+    return (
+        heading in _GENERIC_H2
+        or heading.startswith(title + " ")
+        or heading.endswith(_GENERIC_H2_SUFFIXES)
+        or any(token in heading for token in _NARRATIVE_H2_CONNECTORS)
+        or heading.endswith(_NARRATIVE_H2_SUFFIXES)
+    )
 
 
 def _preserves(pattern: re.Pattern[str], original: str, revision: str) -> bool:

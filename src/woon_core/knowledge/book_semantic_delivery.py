@@ -7,7 +7,7 @@ import json
 import re
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from woon_core.errors import WoonError
 
@@ -56,11 +56,13 @@ class _SourceNodes(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         start = self.source_offset()
+        start_tag = self.get_starttag_text()
+        assert start_tag is not None
         row = {
             "tag": tag,
             "attrs": dict(attrs),
             "start": start,
-            "end": start + len(cast(str, self.get_starttag_text())),
+            "end": start + len(start_tag),
             "parent": self.stack[-1] if self.stack else None,
             "text": "",
         }

@@ -9,7 +9,10 @@ import yaml
 
 from woon_core.errors import WoonError
 from woon_core.knowledge.content_quality_evaluation import (
+    RUBRIC,
+    _compiled_pages,
     _reason_denies_anchor,
+    _review_scope,
     criterion_anchor_candidates,
     evaluate_content_quality,
 )
@@ -83,6 +86,64 @@ def test_accepts_explicit_scope_note_as_evidence_boundary_anchor() -> None:
     assert candidates[0] == (
         "확인 범위: 이 문서는 일반 원리를 설명하며 실제 실행 결과는 별도 검증한다."
     )
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~", "````"])
+def test_code_fences_do_not_consume_quality_evidence_candidates(fence: str) -> None:
+    code = (
+        f"{fence}c\n#include <stdio.h>\n#define FP_ADD(x, y) ((x) + (y))\n"
+        + ("```\n" if len(fence) == 4 else "")
+        + "\n".join(f"# 내부 코드 주석 {index}" for index in range(15))
+        + "\n코드 예제 안의 문자열은 문장 근거가 아니다.\n"
+        + "> 확인 범위: 코드 예제 안의 인용문도 실제 검토 범위가 아니다.\n"
+        + f"{fence}\n\n"
+    )
+    markdown = FIRST.replace("## 질문", code + "## 질문", 1)
+
+    for criterion in RUBRIC:
+        assert criterion_anchor_candidates(markdown, criterion) == criterion_anchor_candidates(
+            FIRST, criterion
+        )
+
+
+def test_review_scope_delegates_explicit_source_index_to_navigation_contract(
+    tmp_path: Path,
+) -> None:
+    _write_catalogs(tmp_path)
+    source_markdown = "# 원자료 색인\n\n- [[wiki/os/first|첫 문서]]\n"
+    source_path = tmp_path / "wiki/resources/sources.md"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(source_markdown, encoding="utf-8")
+    pages_path = tmp_path / "catalog/llm-wiki/pages.yaml"
+    receipts_path = tmp_path / "catalog/llm-wiki/receipts.yaml"
+    pages = yaml.safe_load(pages_path.read_text(encoding="utf-8"))
+    receipts = yaml.safe_load(receipts_path.read_text(encoding="utf-8"))
+    pages["pages"].append(
+        {
+            "page_id": "resources/sources",
+            "output_path": "resources/sources.md",
+            "title": "원자료 색인",
+            "frontmatter": {"content_kind": "source-index"},
+        }
+    )
+    receipts["receipts"].append(
+        {
+            "page_id": "resources/sources",
+            "output_sha256": _digest(source_markdown),
+        }
+    )
+    pages_path.write_text(
+        yaml.safe_dump(pages, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    receipts_path.write_text(
+        yaml.safe_dump(receipts, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+
+    expected, exclusions = _review_scope(tmp_path, _compiled_pages(tmp_path))
+
+    assert set(expected) == {"os/first", "os/second"}
+    assert exclusions[0]["page_id"] == "resources/sources"
+    assert exclusions[0]["reason"] == "source-index-contract"
 
 
 def _write_catalogs(vault: Path) -> None:
@@ -227,6 +288,8 @@ def test_requires_current_passed_reviews_for_every_compiled_page(tmp_path: Path)
     assert result["passed"] is True
     assert result["coverage"] == {
         "compiled_pages": 2,
+        "reviewable_pages": 2,
+        "excluded_pages": 0,
         "reviewed_pages": 2,
         "missing_pages": 0,
         "stale_reviews": 0,

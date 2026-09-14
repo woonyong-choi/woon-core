@@ -21,6 +21,8 @@ from woon_core.knowledge.document_intake import (
 )
 from woon_core.knowledge.document_resolution import (
     audit_document_resolutions,
+    cleanup_document_candidate,
+    read_document_resolution,
     resolve_document_candidate,
 )
 from woon_core.knowledge.source_catalog import plan_source_catalog
@@ -613,6 +615,27 @@ def test_discarded_document_candidate_is_terminal_without_visible_archive(tmp_pa
     assert audit.pending == ()
     assert not (vault / "wiki").exists()
 
+    receipt = vault / result.receipt
+    expected = _sha256(receipt)
+    removed = cleanup_document_candidate(
+        vault,
+        candidate.candidate_id,
+        expected_resolution_sha256=expected,
+    )
+    assert removed["removed"] is True
+    assert not (vault / str(candidate.candidate)).exists()
+    assert read_document_resolution(vault, candidate.candidate_id)["version"] == 2
+    assert audit_document_resolutions(vault).complete
+    assert resolve_document_candidate(vault, decision).replayed
+    replay = ingest_document_candidate(FIXTURE, vault)
+    assert replay.replayed and replay.status == "resolved" and replay.candidate is None
+    assert not (vault / str(candidate.candidate)).exists()
+    assert cleanup_document_candidate(
+        vault,
+        candidate.candidate_id,
+        expected_resolution_sha256=expected,
+    )["replayed"]
+
 
 def test_legacy_review_candidate_can_only_be_discarded(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
@@ -650,16 +673,28 @@ def test_legacy_review_candidate_can_only_be_discarded(tmp_path: Path) -> None:
 
     assert result.disposition == "discarded"
     assert audit_document_resolutions(vault).complete is True
+    cleanup_document_candidate(
+        vault,
+        candidate.candidate_id,
+        expected_resolution_sha256=_sha256(vault / result.receipt),
+    )
+    assert not directory.exists()
+    assert audit_document_resolutions(vault).complete
 
 
-def test_integrated_document_requires_matching_wiki_owned_source(tmp_path: Path) -> None:
+@pytest.mark.parametrize("source_root", ["wiki/private/_sources/knowledge", "private/knowledge"])
+def test_integrated_document_requires_matching_wiki_owned_source(
+    tmp_path: Path,
+    source_root: str,
+) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
     candidate = ingest_document_candidate(FIXTURE, vault)
     canonical = vault / "wiki/concepts/document-intake.md"
     canonical.parent.mkdir(parents=True)
     canonical.write_text("# 문서 수집\n", encoding="utf-8")
-    source_target = vault / "wiki/private/_sources/knowledge/demo/table.html"
+    source_relative = f"{source_root}/demo/table.html"
+    source_target = vault / source_relative
     source_target.parent.mkdir(parents=True)
     source_target.write_bytes(FIXTURE.read_bytes())
     decision = tmp_path / "integrated.json"
@@ -672,7 +707,7 @@ def test_integrated_document_requires_matching_wiki_owned_source(tmp_path: Path)
                 "reason_code": "existing-subject-updated",
                 "rationale": "기존 문서 수집 주제에 검증 가능한 표 구조를 병합했습니다.",
                 "canonical_paths": ["wiki/concepts/document-intake.md"],
-                "source_targets": ["wiki/private/_sources/knowledge/demo/table.html"],
+                "source_targets": [source_relative],
             },
             ensure_ascii=False,
         ),
@@ -683,6 +718,13 @@ def test_integrated_document_requires_matching_wiki_owned_source(tmp_path: Path)
 
     assert result.disposition == "integrated"
     assert audit_document_resolutions(vault).complete is True
+    cleanup_document_candidate(
+        vault,
+        candidate.candidate_id,
+        expected_resolution_sha256=_sha256(vault / result.receipt),
+    )
+    assert source_target.read_bytes() == FIXTURE.read_bytes()
+    assert audit_document_resolutions(vault).complete
 
 
 def test_document_resolution_audit_reports_unresolved_candidate(tmp_path: Path) -> None:
@@ -694,3 +736,67 @@ def test_document_resolution_audit_reports_unresolved_candidate(tmp_path: Path) 
 
     assert audit.complete is False
     assert audit.pending == (candidate.candidate_id,)
+
+
+def test_terminal_cleanup_recovers_and_preserves_unknown_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = ingest_document_candidate(FIXTURE, tmp_path)
+    directory = tmp_path / str(candidate.candidate)
+    decision = tmp_path / "decision.json"
+    decision.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "candidate_id": candidate.candidate_id,
+                "disposition": "discarded",
+                "reason_code": "demo-only",
+                "rationale": "Fixture only",
+                "canonical_paths": [],
+                "source_targets": [],
+            }
+        )
+    )
+    terminal = resolve_document_candidate(tmp_path, decision)
+    expected = _sha256(tmp_path / terminal.receipt)
+    unknown = directory / "user.md"
+    unknown.write_text("사용자 메모")
+    with pytest.raises(WoonError, match="unknown files"):
+        cleanup_document_candidate(
+            tmp_path,
+            candidate.candidate_id,
+            expected_resolution_sha256=expected,
+        )
+    assert unknown.read_text() == "사용자 메모"
+    assert read_document_resolution(tmp_path, candidate.candidate_id)["version"] == 1
+    unknown.rename(tmp_path / "preserved-user.md")
+    original_unlink = Path.unlink
+    removed = []
+
+    def interrupt_unlink(self: Path, *args: object, **kwargs: object) -> None:
+        if self.parent == directory:
+            if removed:
+                raise OSError("interrupted partial cleanup")
+            removed.append(self.name)
+        original_unlink(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", interrupt_unlink)
+        with pytest.raises(OSError):
+            cleanup_document_candidate(
+                tmp_path,
+                candidate.candidate_id,
+                expected_resolution_sha256=expected,
+            )
+    receipt = read_document_resolution(tmp_path, candidate.candidate_id)
+    assert receipt["cleanup"]["state"] == "pending"
+    assert not audit_document_resolutions(tmp_path).complete
+    cleanup_document_candidate(
+        tmp_path,
+        candidate.candidate_id,
+        expected_resolution_sha256=expected,
+    )
+    assert not directory.exists()
+    assert audit_document_resolutions(tmp_path).complete
+    assert (tmp_path / "preserved-user.md").read_text() == "사용자 메모"

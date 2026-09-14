@@ -23,7 +23,8 @@ from woon_core.knowledge.codex_knowledge import (
 from woon_core.knowledge.codex_knowledge import record_codex_knowledge_entries
 from woon_core.knowledge.context_bundle import build_wiki_context_bundle
 from woon_core.knowledge.domain import DocumentMetadata
-from woon_core.knowledge.factory import build_knowledge_service
+from woon_core.knowledge.factory import build_knowledge_service, resolve_knowledge_vault
+from woon_core.knowledge.intake_cli import execute_intake_request
 from woon_core.knowledge.learning_checkpoint import LearningCheckpoint
 from woon_core.knowledge.mail_schedule_automation import (
     record_mail_schedule_candidates,
@@ -53,6 +54,29 @@ def _service() -> KnowledgeService:
     """Reuse one stat-aware service for the lifetime of the stdio MCP process."""
 
     return build_knowledge_service()[1]
+
+
+@mcp.tool(
+    name="woon_knowledge_intake",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def intake_knowledge(action: str, request: dict[str, object]) -> dict[str, object]:
+    """Register/prepare/complete an explicit Inbox request around an existing Wiki writer.
+
+    Actions: register, status, prepare, complete, document-status, document-cleanup,
+    review-status, review-complete, source-body-plan (read-only; shared catalog
+    writer owns application).
+    Complete removes only the generated, unchanged Inbox card after the caller's
+    semantic review and matching target hashes. Document cleanup needs a terminal
+    candidate ID and exact expected resolution SHA. Neither action deletes source
+    evidence or grants permission to write Wiki content or external services.
+    """
+    return execute_intake_request(resolve_knowledge_vault(), action, request)
 
 
 @mcp.tool(
@@ -310,7 +334,7 @@ def record_mail_schedule_candidates_run(
 
     Call this exactly once after reading only allowlisted mail. Pass ``[]`` when
     no new actionable item exists. The tool writes a hash-only receipt and
-    never reads or writes Apple Calendar; Calendar application remains a
+    never reads or writes Google Calendar; Calendar application remains a
     separate policy-authorized local action.
     """
 

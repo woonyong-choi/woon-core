@@ -31,6 +31,7 @@ from woon_core.knowledge.wiki_tree import (
     strip_generated_wiki_views,
 )
 from woon_core.knowledge.yaml_cache import load_yaml_text
+from woon_core.people.records import RECORD_METADATA_FIELDS, resolve_record_metadata
 
 WIKI_ROOT = "wiki"
 WIKI_PERSONAL_ROOT = "wiki/personal"
@@ -92,6 +93,15 @@ _WIKILINK_TARGET_RE = re.compile(r"\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^]
 _MIGRATION_TIMELINE_RE = re.compile(
     r"^- \d{4}-\d{2}-\d{2} · 변경 — 기존 문서를 단일 (?:Woon )?Wiki 정본 계약으로 전환$"
 )
+
+
+def is_retired_wiki_record(metadata: dict[str, Any]) -> bool:
+    """Archived history remains usable; semantic retirement does not."""
+
+    return (
+        str(metadata.get("status", "")).lower() == "retired"
+        or metadata.get("knowledge_state") == "폐기됨"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,9 +505,19 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
         "person_scope",
         "relationship_to_owner",
         "identifiers",
+        "event_people",
+        "event_period",
+        "event_change",
+        "history_person_id",
+        "person_history_target",
+        "include_in_latest",
+        "reader_navigation",
+        "navigation_order",
+        "navigation_groups",
     ):
         value = existing_frontmatter.get(key)
-        if value is not None and merged_frontmatter.get(key) is None:
+        # An explicit null clears old metadata; only omitted keys inherit it.
+        if value is not None and key not in merged_frontmatter:
             merged = _set_frontmatter_object(
                 merged,
                 key,
@@ -505,10 +525,26 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
                 frontmatter=merged_frontmatter,
             )
             merged_frontmatter[key] = value
+    if "record_kind" in existing_frontmatter or "record_kind" in merged_frontmatter:
+        resolved = resolve_record_metadata(existing_frontmatter, merged_frontmatter)
+        for key in sorted(RECORD_METADATA_FIELDS):
+            if key in resolved and key not in merged_frontmatter:
+                merged = _set_frontmatter_object(
+                    merged,
+                    key,
+                    resolved[key],
+                    frontmatter=merged_frontmatter,
+                )
+                merged_frontmatter[key] = resolved[key]
+    planned = _frontmatter_text(merged, "content_status") == "planned"
     merged = _upsert_frontmatter_value(
-        merged, "knowledge_state", json.dumps("근거 확인됨", ensure_ascii=False)
+        merged,
+        "knowledge_state",
+        json.dumps("생각 중" if planned else "근거 확인됨", ensure_ascii=False),
     )
-    merged = _upsert_frontmatter_value(merged, "state_reason", "accepted-evidence-receipt")
+    merged = _upsert_frontmatter_value(
+        merged, "state_reason", "planned-content" if planned else "accepted-evidence-receipt"
+    )
     merged_parent = merged_frontmatter.get("parent")
     if not existing:
         return _normalize_article_view(merged, parent=merged_parent)
@@ -828,8 +864,14 @@ def compiled_wiki_contract(relative: Path, text: str) -> dict[str, object]:
         "view_mode": view_mode,
         "updated": updated,
         "facets": list(_infer_facets(vault_relative, text)),
-        "knowledge_state": "근거 확인됨",
-        "state_reason": "accepted-evidence-receipt",
+        "knowledge_state": (
+            "생각 중" if _frontmatter_text(text, "content_status") == "planned" else "근거 확인됨"
+        ),
+        "state_reason": (
+            "planned-content"
+            if _frontmatter_text(text, "content_status") == "planned"
+            else "accepted-evidence-receipt"
+        ),
         "status": "Active",
         "record_owner": "choi-woonyoung",
         "summary": _frontmatter_text(text, "summary") or _summary_from_document(text),
@@ -837,6 +879,8 @@ def compiled_wiki_contract(relative: Path, text: str) -> dict[str, object]:
 
 
 def _infer_knowledge_state(text: str) -> str:
+    if _frontmatter_text(text, "content_status") == "planned":
+        return "생각 중"
     current = _frontmatter_text(text, "knowledge_state")
     if current in ALLOWED_KNOWLEDGE_STATES:
         return current
@@ -1238,10 +1282,6 @@ def _validate_lifecycle_delta(delta: WikiDelta) -> None:
         and delta.ended_on < delta.started_on
     ):
         raise WoonError("Wiki ended_on cannot precede started_on")
-    if state in {"completed", "cancelled", "archived"} and not (
-        delta.ended_on or delta.occurred_on
-    ):
-        raise WoonError("Wiki closed lifecycle requires ended_on or occurred_on")
     if state in {"idea", "planned", "active", "paused"} and delta.ended_on is not None:
         raise WoonError("Wiki open lifecycle cannot have ended_on")
 
@@ -1894,12 +1934,3 @@ def _merge_h2_rows(text: str, heading: str, rows: list[str]) -> str:
     existing = [line for line in match.group(1).splitlines() if line.strip()]
     merged = existing + [row for row in rows if row not in existing]
     return pattern.sub(f"## {heading}\n\n" + "\n".join(merged) + "\n\n", text, count=1)
-
-
-def is_retired_wiki_record(metadata: dict[str, Any]) -> bool:
-    """Archived history remains usable; semantic retirement does not."""
-
-    return (
-        str(metadata.get("status", "")).lower() == "retired"
-        or metadata.get("knowledge_state") == "폐기됨"
-    )

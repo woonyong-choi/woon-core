@@ -23,6 +23,13 @@ from woon_core.knowledge.content_quality_evaluation import (
     review_verdict_consistency_error,
     validate_criterion_evidence,
 )
+from woon_core.knowledge.content_quality_scope import (
+    BOOK_READER_REASON,
+    PRIVATE_NOVEL_REASON,
+    SOURCE_INDEX_REASON,
+    book_reader_roots,
+    content_quality_exclusion_reason,
+)
 
 PLAN_VERSION = 1
 INHERITED_RESULTS_FILE = ".inherited-results.json"
@@ -44,11 +51,12 @@ def create_content_quality_review_plan(
     batch_size: int,
     max_batch_chars: int = DEFAULT_MAX_BATCH_CHARS,
 ) -> dict[str, object]:
-    """Write immutable review inputs for every current compiled page.
+    """Write immutable review inputs for every externally reviewable compiled page.
 
     A plan directory is deliberately write-once.  Reusing an old plan after a
     compiler or writing-standard change would otherwise make stale reviews look
-    current.
+    current.  Private Novel material is intentionally excluded here rather
+    than relying on a later evaluator to notice it after a plan is written.
     """
 
     if not 1 <= batch_size <= MAX_BATCH_SIZE:
@@ -56,7 +64,7 @@ def create_content_quality_review_plan(
     _validate_max_batch_chars(max_batch_chars)
     standard = _reference(standard_path, standard_uri, "writing standard")
     prompt = _reference(prompt_path, prompt_uri, "quality review prompt")
-    targets = _current_targets(vault)
+    targets, exclusions = _current_review_scope(vault)
     destination = output_dir.expanduser().resolve()
     if destination.exists():
         raise WoonError(f"quality review plan output already exists: {destination}")
@@ -113,7 +121,9 @@ def create_content_quality_review_plan(
     manifest: dict[str, object] = {
         "version": PLAN_VERSION,
         "purpose": (
-            "현재 컴파일된 모든 Wiki의 한국어 학습 품질을 receipt와 표준 해시에 묶어 검토한다."
+            "현재 컴파일된 Wiki의 일반 학습 문서를 receipt와 표준 해시에 묶어 검토한다. "
+            "private Novel은 전송하지 않고, 책 독자 문서는 판본·coverage 계약으로, "
+            "링크 전용 원자료 색인은 탐색 계약으로 따로 검증한다."
         ),
         "standard": standard,
         "prompt": prompt,
@@ -121,6 +131,9 @@ def create_content_quality_review_plan(
         "max_batch_chars": max_batch_chars,
         "targets_sha256": _targets_digest(targets),
         "compiled_pages": len(targets),
+        "excluded_pages": len(exclusions),
+        "exclusions_sha256": _exclusions_digest(exclusions),
+        "exclusions": exclusions,
         "batches": manifest_batches,
     }
     destination.mkdir(mode=_RUNTIME_DIRECTORY_MODE, parents=True)
@@ -144,6 +157,7 @@ def create_content_quality_review_plan(
         "version": PLAN_VERSION,
         "output": str(destination),
         "compiled_pages": len(targets),
+        "excluded_pages": len(exclusions),
         "batches": len(batches),
         "targets_sha256": manifest["targets_sha256"],
     }
@@ -282,9 +296,10 @@ def assemble_content_quality_reviews(
 
     plan = _load_object(plan_path, "quality review plan")
     _validate_plan(plan)
-    current_targets = _current_targets(vault)
+    current_targets, current_exclusions = _current_review_scope(vault)
     if plan["targets_sha256"] != _targets_digest(current_targets):
         raise WoonError("quality review plan is stale for the current compiled pages")
+    _validate_current_exclusions(plan, current_exclusions)
     standard = _mapping(plan["standard"], "quality review plan standard")
     current_standard_sha256 = _file_sha256(standard_path, "writing standard")
     if standard["sha256"] != current_standard_sha256:
@@ -340,18 +355,30 @@ def assemble_content_quality_reviews(
             "prompt_sha256": _mapping(plan["prompt"], "quality review plan prompt")["sha256"],
         },
         "reviews": [reviews[page_id] for page_id in sorted(reviews)],
+        "scope": {
+            "exclusions_sha256": _exclusions_digest(current_exclusions),
+            "exclusions": current_exclusions,
+        },
     }
     atomic_write(destination, encode_json(payload), mode=_RUNTIME_FILE_MODE)
     return {
         "version": PLAN_VERSION,
         "output": str(destination),
         "compiled_pages": len(expected),
+        "excluded_pages": len(current_exclusions),
         "reviews": len(reviews),
         "targets_sha256": plan["targets_sha256"],
     }
 
 
 def _current_targets(vault: Path) -> list[dict[str, str]]:
+    """Retain the narrow target helper for callers that only need Markdown."""
+
+    targets, _ = _current_review_scope(vault)
+    return targets
+
+
+def _current_review_scope(vault: Path) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     root = vault.expanduser().resolve()
     pages = _load_yaml_list(root / "catalog/llm-wiki/pages.yaml", "pages")
     receipts = _load_yaml_list(root / "catalog/llm-wiki/receipts.yaml", "receipts")
@@ -364,7 +391,9 @@ def _current_targets(vault: Path) -> list[dict[str, str]]:
     if len(receipt_hashes) != len(receipts):
         raise WoonError("quality review receipts contain duplicate page_id")
     targets: list[dict[str, str]] = []
+    exclusions: list[dict[str, str]] = []
     seen: set[str] = set()
+    book_roots = book_reader_roots(pages)
     for page in pages:
         page_id = _text(page.get("page_id"), "quality review page_id")
         if page_id in seen:
@@ -377,6 +406,25 @@ def _current_targets(vault: Path) -> list[dict[str, str]]:
         output_sha256 = receipt_hashes.get(page_id)
         if output_sha256 is None:
             raise WoonError(f"compiled page has no receipt: {page_id}")
+        frontmatter = page.get("frontmatter")
+        if frontmatter is not None and not isinstance(frontmatter, dict):
+            raise WoonError("quality review page frontmatter must be a mapping")
+        exclusion_reason = content_quality_exclusion_reason(
+            page_id, output_path, book_roots, frontmatter
+        )
+        if exclusion_reason is not None:
+            # This manifest records the exact current bytes but never copies
+            # excluded Markdown into the hosted-review input.
+            exclusions.append(
+                {
+                    "page_id": page_id,
+                    "relative_path": f"wiki/{output_path}",
+                    "title": _text(page.get("title"), "quality review page title"),
+                    "output_sha256": output_sha256,
+                    "reason": exclusion_reason,
+                }
+            )
+            continue
         markdown_path = root / "wiki" / output_path
         try:
             markdown = markdown_path.read_text(encoding="utf-8")
@@ -396,7 +444,10 @@ def _current_targets(vault: Path) -> list[dict[str, str]]:
     extra = sorted(set(receipt_hashes).difference(seen))
     if extra:
         raise WoonError("quality review receipts have no page spec: " + ",".join(extra))
-    return sorted(targets, key=lambda target: target["page_id"])
+    return (
+        sorted(targets, key=lambda target: target["page_id"]),
+        sorted(exclusions, key=lambda exclusion: exclusion["page_id"]),
+    )
 
 
 def _batch_targets(
@@ -438,6 +489,21 @@ def _reference(path: Path, uri: str, label: str) -> dict[str, str]:
 
 def _target_manifest(target: dict[str, str]) -> dict[str, str]:
     return {key: target[key] for key in ("page_id", "relative_path", "title", "output_sha256")}
+
+
+def _validate_current_exclusions(plan: dict[str, object], exclusions: list[dict[str, str]]) -> None:
+    """Fail closed if a plan's non-hosted contract scope changes."""
+
+    planned = plan.get("exclusions")
+    planned_digest = plan.get("exclusions_sha256")
+    if planned is None or planned_digest is None:
+        raise WoonError("quality review plan does not declare its exclusion scope")
+    if not isinstance(planned, list) or any(not isinstance(item, dict) for item in planned):
+        raise WoonError("quality review plan exclusions must be a mapping list")
+    if planned != exclusions or planned_digest != _exclusions_digest(exclusions):
+        raise WoonError(
+            "quality review plan exclusion scope is stale for the current compiled pages"
+        )
 
 
 def _references_match(prior: dict[str, object], current: dict[str, object]) -> bool:
@@ -595,6 +661,29 @@ def _validate_plan(plan: dict[str, object]) -> None:
     _mapping(plan.get("prompt"), "quality review plan prompt")
     _digest(plan.get("targets_sha256"), "quality review plan targets_sha256")
     _list(plan.get("batches"), "quality review plan batches")
+    if "exclusions" in plan:
+        exclusions = _list(plan["exclusions"], "quality review plan exclusions")
+        checked_exclusions: list[dict[str, str]] = []
+        for exclusion in exclusions:
+            record = _mapping(exclusion, "quality review plan exclusion")
+            if set(record) != {"page_id", "relative_path", "title", "output_sha256", "reason"}:
+                raise WoonError("quality review plan exclusion has unexpected fields")
+            _text(record.get("page_id"), "quality review plan exclusion page_id")
+            _safe_relative(
+                _text(record.get("relative_path"), "quality review plan exclusion relative_path"),
+                "quality review plan exclusion relative_path",
+            )
+            _text(record.get("title"), "quality review plan exclusion title")
+            _digest(record.get("output_sha256"), "quality review plan exclusion output_sha256")
+            reason = _text(record.get("reason"), "quality review plan exclusion reason")
+            checked_exclusions.append({key: str(value) for key, value in record.items()})
+            if reason not in {PRIVATE_NOVEL_REASON, BOOK_READER_REASON, SOURCE_INDEX_REASON}:
+                raise WoonError("quality review plan exclusion has an unknown reason")
+        _digest(plan.get("exclusions_sha256"), "quality review plan exclusions_sha256")
+        if plan.get("excluded_pages") != len(exclusions):
+            raise WoonError("quality review plan excluded_pages does not match exclusions")
+        if plan["exclusions_sha256"] != _exclusions_digest(checked_exclusions):
+            raise WoonError("quality review plan exclusions_sha256 does not match exclusions")
     if "max_batch_chars" in plan:
         max_batch_chars = plan["max_batch_chars"]
         if isinstance(max_batch_chars, bool) or not isinstance(max_batch_chars, int):
@@ -607,6 +696,15 @@ def _targets_digest(targets: list[dict[str, str]]) -> str:
     for target in sorted(targets, key=lambda item: item["page_id"]):
         for key in ("page_id", "relative_path", "title", "output_sha256"):
             digest.update(target[key].encode("utf-8"))
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _exclusions_digest(exclusions: list[dict[str, str]]) -> str:
+    digest = hashlib.sha256()
+    for exclusion in sorted(exclusions, key=lambda item: item["page_id"]):
+        for key in ("page_id", "relative_path", "title", "output_sha256", "reason"):
+            digest.update(exclusion[key].encode("utf-8"))
             digest.update(b"\0")
     return digest.hexdigest()
 

@@ -175,6 +175,32 @@ def ingest_document_candidate(
         lock = runtime / "locks" / f"{candidate_id}.lock"
 
         with exclusive_file_lock(lock):
+            terminal_path = runtime / "resolutions" / f"{candidate_id}.json"
+            if terminal_path.is_file():
+                from woon_core.knowledge.document_resolution import read_document_resolution
+
+                terminal = read_document_resolution(root, candidate_id)
+                if terminal["source_sha256"] != source_hash:
+                    raise WoonError("terminal document source hash mismatch")
+                observation = _write_observation(
+                    runtime,
+                    candidate_directory,
+                    candidate_id=candidate_id,
+                    locator=locator,
+                    source_hash=source_hash,
+                    source_size=input_path.stat().st_size,
+                    source_suffix=suffix,
+                    candidate_receipt_sha256=terminal["candidate_receipt_sha256"],
+                )
+                return DocumentCandidateResult(
+                    candidate_id=candidate_id,
+                    status=terminal["status"],
+                    replayed=True,
+                    candidate=None,
+                    receipt=_relative(root, terminal_path),
+                    observation=_relative(root, observation),
+                    source_sha256=source_hash,
+                )
             existing_receipt = candidate_directory / "receipt.json"
             replayed = existing_receipt.is_file()
             if replayed:
@@ -855,6 +881,7 @@ def _write_observation(
     source_hash: str,
     source_size: int,
     source_suffix: str,
+    candidate_receipt_sha256: str | None = None,
 ) -> Path:
     observation_id = (
         f"observation-{_json_sha256({'candidate_id': candidate_id, 'locator': locator})}"
@@ -872,7 +899,9 @@ def _write_observation(
             "size": source_size,
             "suffix": source_suffix,
         },
-        "candidate_receipt_sha256": _sha256(candidate_directory / "receipt.json"),
+        "candidate_receipt_sha256": (
+            candidate_receipt_sha256 or _sha256(candidate_directory / "receipt.json")
+        ),
         "canonical_writes": False,
     }
     lock = runtime / "locks" / f"{observation_id}.lock"

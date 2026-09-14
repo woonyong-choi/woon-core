@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -62,7 +63,7 @@ def test_creates_only_review_candidate_for_allowlisted_datetime_mail(tmp_path: P
     assert candidate.source_locator not in stored
     assert "status: Review" in stored
     assert "calendar_candidate:" not in stored
-    assert "Apple Calendar에 바로 반영하지 않는다." in stored
+    assert "Google Calendar에 바로 반영하지 않는다." in stored
     assert "원문 메일 본문은 절대 저장하면 안 된다" not in stored
 
 
@@ -213,3 +214,53 @@ def test_person_memory_candidate_rejects_bare_name_and_contact_like_content() ->
         )
         is None
     )
+
+
+def test_consumed_review_is_readable_and_not_recreated(tmp_path: Path) -> None:
+    from woon_core.knowledge.review_resolution import complete_review, read_review_resolution
+    from woon_core.knowledge.second_brain_candidates import ReviewCandidate
+
+    candidate = ReviewCandidate(
+        candidate_id="codex-fixture",
+        kind="codex-projection",
+        source_locator="codex:fixture",
+        summary="정본에 보존된 결정",
+        display_title="기록 검토",
+        occurred_at=datetime.now(UTC),
+        time_precision="none",
+        scheduled_for=None,
+        calendar_candidate=False,
+    )
+    persist_review_candidates(tmp_path, "brain/review/codex", (candidate,))
+    card = next((tmp_path / "brain/review/codex").glob("*.md"))
+    digest = hashlib.sha256(card.read_bytes()).hexdigest()
+    request = {"relative_path": card.relative_to(tmp_path).as_posix(), "source_sha256": digest}
+    complete_review(tmp_path, **request, disposition="integrated", review_reference="wiki:fixture")
+    assert read_review_resolution(tmp_path, **request)["state"] == "complete"
+    persist_review_candidates(tmp_path, "brain/review/codex", (candidate,))
+    assert not card.exists()
+    assert complete_review(
+        tmp_path,
+        **request,
+        disposition="integrated",
+        review_reference="wiki:fixture",
+    )["replayed"]
+
+
+def test_review_cleanup_stops_for_a_concurrent_user_edit(tmp_path: Path) -> None:
+    from woon_core.knowledge.review_resolution import complete_review
+
+    card = tmp_path / "brain/review/codex/card.md"
+    card.parent.mkdir(parents=True)
+    card.write_text("---\ntype: Candidate\nstatus: Review\n---\n# 검토\n")
+    digest = hashlib.sha256(card.read_bytes()).hexdigest()
+    card.write_text(card.read_text() + "사용자 고유 메모\n")
+    with pytest.raises(WoonError, match="changed"):
+        complete_review(
+            tmp_path,
+            relative_path="brain/review/codex/card.md",
+            source_sha256=digest,
+            disposition="obsolete",
+            review_reference="owner:reviewed",
+        )
+    assert "사용자 고유 메모" in card.read_text()

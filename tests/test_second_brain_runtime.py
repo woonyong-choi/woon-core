@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import yaml
 from test_orchestration import write_policy
 
 from woon_core.errors import WoonError
@@ -85,6 +86,38 @@ def test_planned_lane_cannot_create_runtime_state(tmp_path: Path) -> None:
     assert not settings.checkpoint_path.exists()
 
 
+@pytest.mark.parametrize("governance_status", ["paused", "removed"])
+def test_inactive_governance_does_not_gate_an_independent_lane(
+    tmp_path: Path, governance_status: str
+) -> None:
+    _write_runnable_policy(tmp_path)
+    path = tmp_path / "config/second-brain-orchestrator.yaml"
+    raw = yaml.safe_load(path.read_text())
+    if governance_status == "removed":
+        raw["automations"] = [
+            item for item in raw["automations"] if item["id"] != "governance-audit"
+        ]
+    else:
+        for item in raw["automations"]:
+            if item["id"] == "governance-audit":
+                item["execution"]["status"] = "paused"
+    path.write_text(yaml.safe_dump(raw))
+    settings = load_orchestrator_settings(tmp_path)
+    result = AutomationRunStore(settings).run(
+        "mail-schedule-candidates",
+        _request(settings, tmp_path),
+        lambda: RunOutcome(candidate_ids=(), output_sha256="a" * 64),
+    )
+    assert not result.replayed
+    if governance_status == "paused":
+        with pytest.raises(WoonError, match="not enabled"):
+            AutomationRunStore(settings).run(
+                "governance-audit",
+                _request(settings, tmp_path),
+                lambda: RunOutcome(candidate_ids=(), output_sha256="a" * 64),
+            )
+
+
 def test_commits_receipt_before_checkpoint_and_replays_same_operation(tmp_path: Path) -> None:
     _write_runnable_policy(tmp_path)
     settings = load_orchestrator_settings(tmp_path)
@@ -122,63 +155,6 @@ def test_commits_receipt_before_checkpoint_and_replays_same_operation(tmp_path: 
         "source_range": "fixture-range-001",
         "version": 1,
     }
-
-
-def test_governance_preflight_unblocks_a_policy_changed_lane(tmp_path: Path) -> None:
-    _write_runnable_policy(tmp_path)
-    settings = load_orchestrator_settings(tmp_path)
-    store = AutomationRunStore(settings)
-
-    stale_checkpoint = {
-        "version": 1,
-        "lanes": {
-            "mail-schedule-candidates": {
-                "automation_id": "mail-schedule-candidates",
-                "cursor": "old-cursor",
-                "owned_revision": "a" * 64,
-                "policy_sha256": "c" * 64,
-                "receipt_id": "d" * 64,
-            }
-        },
-    }
-    settings.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    settings.checkpoint_path.write_text(json.dumps(stale_checkpoint), encoding="utf-8")
-    request = _request(settings, tmp_path, cursor="cursor-after-preflight")
-
-    with pytest.raises(WoonError, match="requires governance preflight"):
-        store.run(
-            "mail-schedule-candidates",
-            request,
-            lambda: RunOutcome(candidate_ids=(), output_sha256="a" * 64),
-        )
-
-    result = record_governance_preflight(
-        settings,
-        input_sha256=hashlib.sha256(b"verified instruction inventory").hexdigest(),
-        output_sha256=hashlib.sha256(b"verified health and registry checks").hexdigest(),
-    )
-
-    assert result.replayed is False
-    resumed = store.run(
-        "mail-schedule-candidates",
-        request,
-        lambda: RunOutcome(candidate_ids=(), output_sha256="a" * 64),
-    )
-    assert resumed.replayed is False
-
-
-def test_first_enabled_lane_requires_current_governance_preflight(tmp_path: Path) -> None:
-    _write_runnable_policy(tmp_path)
-    settings = load_orchestrator_settings(tmp_path)
-    settings.checkpoint_path.unlink()
-    request = _request(settings, tmp_path, cursor="cursor-first-run")
-
-    with pytest.raises(WoonError, match="requires governance preflight"):
-        AutomationRunStore(settings).run(
-            "mail-schedule-candidates",
-            request,
-            lambda: RunOutcome(candidate_ids=(), output_sha256="a" * 64),
-        )
 
 
 def test_governance_preflight_prunes_only_retired_checkpoint_lanes(tmp_path: Path) -> None:
@@ -390,53 +366,3 @@ def test_rejects_proposal_lane_from_using_candidate_writer(tmp_path: Path) -> No
 
     with pytest.raises(WoonError, match="requires candidate-only lane"):
         AutomationRunStore(settings).run_review_candidates("mail-schedule-candidates", request, ())
-
-
-def test_policy_change_blocks_existing_lane_until_governance_preflight(tmp_path: Path) -> None:
-    _write_runnable_policy(tmp_path)
-    initial = load_orchestrator_settings(tmp_path)
-    initial_request = _request(initial, tmp_path, cursor="cursor-before-policy-change")
-    AutomationRunStore(initial).run(
-        "mail-schedule-candidates",
-        initial_request,
-        lambda: RunOutcome(candidate_ids=(), output_sha256="e" * 64),
-    )
-
-    policy_path = tmp_path / "config/second-brain-orchestrator.yaml"
-    policy_path.write_text(
-        policy_path.read_text(encoding="utf-8") + "\n# policy revision for fixture\n",
-        encoding="utf-8",
-    )
-    revised = load_orchestrator_settings(tmp_path)
-    mail_request = RunRequest(
-        source_range="fixture-range-after-policy-change",
-        input_sha256=hashlib.sha256(b"new safe fixture input").hexdigest(),
-        expected_owned_revision=snapshot_owned_paths(tmp_path, ("brain/review/mail",)),
-        cursor_after="cursor-after-policy-change",
-    )
-    calls = 0
-
-    def produce_mail() -> RunOutcome:
-        nonlocal calls
-        calls += 1
-        return RunOutcome(candidate_ids=(), output_sha256="f" * 64)
-
-    with pytest.raises(WoonError, match="requires governance preflight"):
-        AutomationRunStore(revised).run("mail-schedule-candidates", mail_request, produce_mail)
-    assert calls == 0
-
-    governance_request = RunRequest(
-        source_range="governance-policy-revision",
-        input_sha256=hashlib.sha256(b"current policy inventory").hexdigest(),
-        expected_owned_revision=snapshot_owned_paths(tmp_path, ("brain/review/governance",)),
-        cursor_after="governance-policy-revision",
-    )
-    AutomationRunStore(revised).run(
-        "governance-audit",
-        governance_request,
-        lambda: RunOutcome(candidate_ids=(), output_sha256="a" * 64),
-    )
-
-    result = AutomationRunStore(revised).run("mail-schedule-candidates", mail_request, produce_mail)
-    assert result.replayed is False
-    assert calls == 1

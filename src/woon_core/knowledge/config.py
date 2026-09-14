@@ -36,6 +36,7 @@ class KnowledgeSettings:
     style_guide: Path
     diagram_guide: Path
     compiled_wiki: CompiledWikiSettings | None
+    search_freshness: str = "strict"
 
     @classmethod
     def load(
@@ -55,6 +56,9 @@ class KnowledgeSettings:
             raise WoonError(f"unsupported knowledge configuration version: {version!r}")
         canonical = _mapping(raw, "canonical")
         search = _mapping(raw, "search")
+        freshness = search.get("freshness", "strict")
+        if freshness not in {"strict", "document"}:
+            raise WoonError("search.freshness must be strict or document")
         style = _mapping(raw, "style")
         canonical_root = _inside(resolved_vault, canonical.get("root"), "canonical.root")
         runtime_root = _inside(resolved_vault, raw.get("runtime_root"), "runtime_root")
@@ -112,6 +116,7 @@ class KnowledgeSettings:
                 repository_resolver,
             ),
             compiled_wiki=compiled_wiki,
+            search_freshness=freshness,
         )
 
 

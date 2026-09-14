@@ -7,10 +7,6 @@ from pathlib import Path
 import pytest
 from test_orchestration import write_policy
 
-from woon_core.calendar.projection import (
-    CalendarProjectionEvent,
-    CalendarProjectionService,
-)
 from woon_core.errors import WoonError
 from woon_core.knowledge.codex_daily_digest import record_daily_digest_from_codex_ledger
 from woon_core.knowledge.codex_knowledge import (
@@ -84,9 +80,9 @@ def test_projects_one_safe_batch_to_single_wiki_and_daily_projection(tmp_path: P
     rendered = (tmp_path / digest.relative_path).read_text(encoding="utf-8")
     assert "대화 지식화는 한 번 분류하고 두 번 사용한다" in rendered
     assert "대화 후보의 승격 기준을 어떻게 좁힐까" not in rendered
-    assert "## 정본 변경" in rendered
+    assert "## 정본 변경" not in rendered
     assert (
-        "[[../../wiki/nodes/대화-지식화는-한-번-분류하고-두-번-사용한다|"
+        "## [[../../wiki/nodes/대화-지식화는-한-번-분류하고-두-번-사용한다|"
         "대화 지식화는 한 번 분류하고 두 번 사용한다]]"
     ) in rendered
     records = [
@@ -238,7 +234,7 @@ def test_daily_collection_projects_independent_stages_without_repromoting_wiki(
         area="learning",
         start_date=day,
     )
-    first_tasks = tasks.materialize_due(on_date=day)
+    first_tasks = tasks.complete(task_id="learning-review-wiki", on_date=day)
     daily_path = tmp_path / first_tasks.daily_relative_path
     daily_path.write_text(
         daily_path.read_text(encoding="utf-8") + "\n사용자가 직접 남긴 메모\n",
@@ -266,49 +262,22 @@ def test_daily_collection_projects_independent_stages_without_repromoting_wiki(
     )
     first_digest = record_daily_digest_from_codex_ledger(tmp_path, day=day)
 
-    class Reader:
-        def list_events(
-            self, *, start_at: datetime, end_at: datetime
-        ) -> tuple[CalendarProjectionEvent, ...]:
-            del start_at, end_at
-            return (
-                CalendarProjectionEvent(
-                    source_event_id="opaque-daily-pipeline-event",
-                    calendar_name="개인",
-                    title="Wiki 구조 검토",
-                    start_at=datetime(2026, 8, 25, 1, 0, tzinfo=UTC),
-                    end_at=datetime(2026, 8, 25, 2, 0, tzinfo=UTC),
-                    all_day=False,
-                ),
-            )
-
-    calendar = CalendarProjectionService(tmp_path, Reader())
-    first_calendar = calendar.refresh(now=datetime(2026, 8, 25, 0, 0, tzinfo=UTC))
     wiki_files_before = tuple(
         sorted(path.relative_to(tmp_path) for path in (tmp_path / "wiki").rglob("*.md"))
     )
     daily_before = daily_path.read_bytes()
-    calendar_before = {
-        path.relative_to(tmp_path).as_posix(): path.read_bytes()
-        for path in (tmp_path / "inbox/calendar").rglob("*")
-        if path.is_file()
-    }
-
     replay_tasks = tasks.materialize_due(on_date=day)
     replay_ingest = record_codex_knowledge_entries(
         tmp_path, source_range=source_range, entries=records
     )
     replay_digest = record_daily_digest_from_codex_ledger(tmp_path, day=day)
-    replay_calendar = calendar.refresh(now=datetime(2026, 8, 25, 0, 0, tzinfo=UTC))
 
     rendered = daily_path.read_text(encoding="utf-8")
     assert first_ingest.replayed is False
     assert first_digest.replayed is False
-    assert first_calendar.changed is True
     assert replay_tasks.changed_daily_note is False
     assert replay_ingest.replayed is True
     assert replay_digest.replayed is True
-    assert replay_calendar.changed is False
     assert daily_path.read_bytes() == daily_before
     assert rendered.count("<!-- woon-tasks:start -->") == 1
     assert rendered.count("<!-- woon-codex-digest:start -->") == 1
@@ -320,11 +289,6 @@ def test_daily_collection_projects_independent_stages_without_repromoting_wiki(
         tuple(sorted(path.relative_to(tmp_path) for path in (tmp_path / "wiki").rglob("*.md")))
         == wiki_files_before
     )
-    assert {
-        path.relative_to(tmp_path).as_posix(): path.read_bytes()
-        for path in (tmp_path / "inbox/calendar").rglob("*")
-        if path.is_file()
-    } == calendar_before
 
 
 def test_rejects_raw_like_or_conflicting_wiki_entries_without_receipt(tmp_path: Path) -> None:
@@ -690,21 +654,21 @@ def test_indexes_non_book_resource_link_and_materializes_project_once(tmp_path: 
         tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-19"
     ).stat().st_mode & 0o777 == 0o700
     daily = (tmp_path / digest.relative_path).read_text(encoding="utf-8")
-    assert "## 정본 변경" in daily
+    assert "## 정본 변경" not in daily
     assert "`프로젝트`" not in daily
-    assert "[[../../wiki/resources/ai|AICE 자격 준비를 시작한다]]" in daily
+    assert "## [[../../wiki/resources/ai|AICE 자격 준비를 시작한다]]" in daily
     assert "[[../../wiki/personal/projects/aice-associate-준비|AICE Associate 준비]]" in daily
 
 
-def test_closed_project_requires_and_writes_a_verified_end_date(tmp_path: Path) -> None:
+def test_closed_project_keeps_unknown_date_then_adds_verified_date(tmp_path: Path) -> None:
     _settings(tmp_path)
-    invalid = entries_from_records(
+    unknown_date = entries_from_records(
         [
             {
                 "day": "2026-08-25",
                 "kind": "프로젝트",
                 "title": "하루 프로젝트를 종료한다",
-                "summary": "같은 날 시작하고 종료한 프로젝트다.",
+                "summary": "종료 사실을 확인했지만 실제 종료 날짜는 모른다.",
                 "wiki_update": False,
                 "projects": [
                     {
@@ -716,15 +680,15 @@ def test_closed_project_requires_and_writes_a_verified_end_date(tmp_path: Path) 
             }
         ]
     )
-    with pytest.raises(
-        WoonError,
-        match="project closed lifecycle requires ended_on or occurred_on",
-    ):
-        record_codex_knowledge_entries(
-            tmp_path,
-            source_range="codex-scope-20260825-closed-project-missing-date",
-            entries=invalid,
-        )
+    record_codex_knowledge_entries(
+        tmp_path,
+        source_range="codex-scope-20260825-closed-project-missing-date",
+        entries=unknown_date,
+    )
+    project_path = tmp_path / "wiki/personal/projects/하루-프로젝트.md"
+    project = project_path.read_text(encoding="utf-8")
+    assert "lifecycle_status: completed" in project
+    assert all(f"{field}:" not in project for field in ("started_on", "ended_on", "occurred_on"))
 
     valid = entries_from_records(
         [
@@ -751,7 +715,7 @@ def test_closed_project_requires_and_writes_a_verified_end_date(tmp_path: Path) 
         entries=valid,
     )
 
-    project = (tmp_path / "wiki/personal/projects/하루-프로젝트.md").read_text(encoding="utf-8")
+    project = project_path.read_text(encoding="utf-8")
     assert "lifecycle_status: completed" in project
     assert "occurred_on: 2026-08-25" in project
 
@@ -1349,6 +1313,8 @@ def test_projects_daily_activity_and_explicit_person_facts_without_identity_link
                 "day": "2026-08-19",
                 "kind": "일정",
                 "title": "면접 일정 확인 필요",
+                "disposition": "review",
+                "review_reason": "시각과 목적이 확인되지 않았다.",
                 "summary": "시각과 목적이 모두 확인되면 별도 일정 반영 경로에서 처리한다.",
             },
         ]
@@ -1375,7 +1341,7 @@ def test_projects_daily_activity_and_explicit_person_facts_without_identity_link
     schedule_candidate = next(
         candidate
         for candidate in candidates
-        if "일정 검토" in candidate.read_text(encoding="utf-8")
+        if "확인 필요: 면접 일정" in candidate.read_text(encoding="utf-8")
     )
     assert "people:" not in person_candidate.read_text(encoding="utf-8")
     assert "외부 일정, 인물 카드" in schedule_candidate.read_text(encoding="utf-8")
@@ -1499,8 +1465,8 @@ def _settings(vault: Path):
       prompt_sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
       owned_paths:
         [wiki, brain/review/codex, .local/woon-knowledge/codex-knowledge,
-         .local/woon-knowledge/document-intake, wiki/private/_sources/codex,
-         wiki/private/_sources/knowledge]
+         .local/woon-knowledge/document-intake, private/codex,
+         private/knowledge]
   - id: daily-record-materialization
     owner: daily-record-task
     cadence: daily
@@ -1519,7 +1485,7 @@ def _settings(vault: Path):
       rrule: FREQ=DAILY;BYHOUR=0;BYMINUTE=5
       notification_policy: failed_runs_only
       prompt_sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-      owned_paths: [inbox/daily, inbox/calendar, brain/review/activity]
+      owned_paths: [inbox/daily, brain/review/activity]
 """
     policy.write_text(
         original.replace(
@@ -1634,3 +1600,26 @@ def _write_tree_base(vault: Path) -> None:
             f"# {title}\n",
             encoding="utf-8",
         )
+
+
+def test_organized_career_does_not_make_a_duplicate_review_but_uncertainty_does() -> None:
+    from dataclasses import replace
+
+    from woon_core.knowledge.codex_knowledge import CodexKnowledgeEntry, _review_candidates
+
+    organized = CodexKnowledgeEntry(
+        day=date(2026, 8, 31),
+        kind="커리어",
+        title="면접 준비",
+        summary="개인 기여와 팀 성과 구분",
+        wiki_update=True,
+        wiki_subject_path="wiki/personal/interview.md",
+    )
+    assert _review_candidates((organized,)) == ()
+    unresolved = replace(
+        organized,
+        disposition="review",
+        review_reason="당사자 귀속 확인 필요",
+        wiki_update=False,
+    )
+    assert len(_review_candidates((unresolved,))) == 1

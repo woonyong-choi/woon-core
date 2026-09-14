@@ -49,7 +49,7 @@ def archive_private_source_corpus(
     source_name: str,
     wiki_subject: str,
 ) -> SourceArchiveResult:
-    """Move one exact corpus under ``wiki/private/_sources`` with rollback.
+    """Move one exact corpus under ``private/`` with rollback.
 
     The catalog and reconciliation ledger contain only safe relative paths and
     content hashes.  If any target byte or metadata write fails, the source

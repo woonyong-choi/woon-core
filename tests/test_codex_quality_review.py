@@ -109,6 +109,8 @@ def test_review_prompt_uses_compiler_provenance_without_requiring_inline_citatio
     assert "`확인 범위:` anchor" in prompt
     assert "막연히" in prompt
     assert "명확한 결함을 입증하지 못하면 pass" in prompt
+    assert "`정리`, `이어서 읽기`" in prompt
+    assert "`… 코드`, `… 필요성`, `… 개요`" in prompt
 
 
 def test_scope_note_cannot_be_its_own_failing_evidence_boundary() -> None:

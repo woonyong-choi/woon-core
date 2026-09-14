@@ -26,9 +26,8 @@ def test_refresh_creates_a_date_aware_person_dashboard_idempotently(tmp_path: Pa
     assert second.changed is False
     assert is_core_person_dashboard_base(path) is True
     assert [view["name"] for view in parsed["views"]] == [
-        "최근 색인 문서",
-        "다가오는 일정",
         "프로젝트·학습·자료",
+        "다가오는 일정",
         "지난 일정",
     ]
     assert "people.contains(this)" in content

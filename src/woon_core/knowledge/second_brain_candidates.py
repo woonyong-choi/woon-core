@@ -16,14 +16,49 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal
 
+import yaml
+
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write
+from woon_core.knowledge.review_resolution import read_review_resolution
 from woon_core.knowledge.second_brain_runtime import RunOutcome
 
 _LOCATOR_RE = re.compile(r"[a-z][a-z0-9-]{1,63}:[A-Za-z0-9._:#-]{1,192}")
 _SUMMARY_LIMIT = 280
 _PERSON_NAME_RE = re.compile(r"[A-Za-z가-힣][A-Za-z가-힣 .'-]{0,47}")
 _DISPLAY_FILE_STEM_RE = re.compile(r"[^0-9A-Za-z가-힣_-]+")
+
+
+def render_intake_candidate(
+    *,
+    intake_id: str,
+    title: str,
+    summary: str,
+    source_locators: tuple[str, ...],
+    keywords: tuple[str, ...],
+) -> str:
+    """Render a requested Inbox unit without changing legacy automation identities.
+
+    Stable IDs belong to the intake service. Titles and summaries can change
+    without creating another request; generic policy boilerplate is not copied
+    into each card.
+    """
+    header = {
+        "type": "Candidate",
+        "title": title,
+        "summary": summary,
+        "publish": False,
+        "access": "local-only",
+        "status": "Review",
+        "intake_id": intake_id,
+        "source_refs": list(source_locators),
+        "keywords": list(keywords),
+    }
+    return (
+        "---\n"
+        + yaml.safe_dump(header, allow_unicode=True, sort_keys=False)
+        + (f"---\n\n# {title}\n\n{summary}\n")
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +248,15 @@ def prepare_review_candidates(
         seen.add(candidate.candidate_id)
         data = _render_candidate(candidate).encode("utf-8")
         path = root / _candidate_filename(candidate)
+        terminal = read_review_resolution(
+            vault,
+            relative_path=path.relative_to(vault.resolve()).as_posix(),
+            source_sha256=hashlib.sha256(data).hexdigest(),
+        )
+        if terminal:
+            if terminal["state"] != "complete":
+                raise WoonError("review cleanup is pending; finish it before replay")
+            continue
         if path.exists() and path.read_bytes() != data:
             raise WoonError("candidate conflicts with an existing review file")
         prepared.append((path, data))
@@ -328,7 +372,7 @@ def _render_candidate(candidate: ReviewCandidate) -> str:
             [
                 "## 반영 경계",
                 "",
-                "- 메일 자동화는 이 후보를 Apple Calendar에 바로 반영하지 않는다. "
+                "- 메일 자동화는 이 후보를 Google Calendar에 바로 반영하지 않는다. "
                 "시간 약속은 별도 local policy 경로에서 사용자가 확인한 뒤에만 처리한다.",
                 "- 날짜만 있거나 모호·변경·취소 요청이면 실제 반영하지 않고 검토 대상으로 남긴다.",
                 "- 원문 메일·대화·system/tool/reasoning은 이 파일에 복사하지 않는다.",

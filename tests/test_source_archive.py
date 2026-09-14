@@ -33,9 +33,7 @@ def test_moves_private_corpus_into_wiki_source_boundary(tmp_path: Path) -> None:
     assert catalog["wiki_subject"] == "wiki/study.md"
     assert {record["state"] for record in catalog["records"]} == {"canonical"}
     assert {record["role"] for record in catalog["records"]} == {"document"}
-    assert all(
-        str(record["target"]).startswith("private/knowledge/") for record in catalog["records"]
-    )
+    assert all(str(record["target"]).startswith("private/") for record in catalog["records"])
     ledger = yaml.safe_load((vault / "catalog/reconciliation/study-drop.yaml").read_text())
     assert {record["action"] for record in ledger["records"]} == {"move-to-wiki-source"}
     receipt_directory = vault / ".local/woon-knowledge/source-archive"

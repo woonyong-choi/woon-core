@@ -795,6 +795,16 @@ title: 큐
     assert "큐를 다시 학습했다" in merged
 
 
+def test_compiler_render_can_clear_an_old_entity_classification() -> None:
+    existing = "---\ntype: Wiki\ntitle: PintOS\nentity_kind: project\n---\n\n# PintOS\n"
+    rendered = "---\ntype: Wiki\ntitle: PintOS\nentity_kind: null\n---\n\n# PintOS\n"
+
+    merged = preserve_managed_context(existing, rendered)
+
+    assert "entity_kind: null" in merged
+    assert "entity_kind: project" not in merged
+
+
 def test_compiler_context_refactor_preserves_exact_output_bytes() -> None:
     existing = """---
 type: Wiki

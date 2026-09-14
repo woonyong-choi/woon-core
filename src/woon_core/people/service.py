@@ -32,12 +32,17 @@ _ROLES = frozenset(
         "reviewer",
         "subject",
         "mentioned",
+        "related-record",
     }
 )
 _FORBIDDEN_LINK_ROOTS = (
     "catalog/",
     "wiki/private/_sources/knowledge/private/",
     "wiki/private/_sources/novel/",
+    "private/knowledge/private/",
+    "private/novel/",
+    "wiki/private/novel/",
+    "wiki/private/people/",
 )
 _PRIVATE_HISTORY_ROOTS = (
     "inbox/calendar/events/",
@@ -336,11 +341,17 @@ class PersonService:
             )
         return PersonIdentifierWriteResult(changed=changed, card=card)
 
-    def documents_for(self, person_id: str) -> tuple[PersonDocument, ...]:
-        """Return deliberate person links plus the Vault owner's implicit record ownership."""
+    def documents_for(
+        self, person_id: str, *, include_owned: bool = False
+    ) -> tuple[PersonDocument, ...]:
+        """Return explicit relationships; ownership retrieval requires an explicit opt-in."""
 
         card = self._card(person_id)
-        return self._documents_for(card, include_implicit_default_owner=True)
+        return self._documents_for(
+            card,
+            include_implicit_default_owner=include_owned,
+            include_record_owner=include_owned,
+        )
 
     def private_history_card(self, person_id: str) -> PersonCard:
         """Read one exact local card for the private-history adapter only."""
@@ -366,6 +377,7 @@ class PersonService:
         card: PersonCard,
         *,
         include_implicit_default_owner: bool,
+        include_record_owner: bool = True,
         private_history_only: bool = False,
     ) -> tuple[PersonDocument, ...]:
         """Return deliberate links after the caller has applied the correct scope boundary."""
@@ -394,8 +406,9 @@ class PersonService:
             is_implicit_default_owner = (
                 card.person_id == _DEFAULT_OWNER_ID and explicit_owner is None
             )
-            is_record_owner = explicit_owner in {card.person_id, link} or (
-                include_implicit_default_owner and is_implicit_default_owner
+            is_record_owner = include_record_owner and (
+                explicit_owner in {card.person_id, link}
+                or (include_implicit_default_owner and is_implicit_default_owner)
             )
             if link not in people and not is_record_owner:
                 continue
@@ -470,6 +483,23 @@ class PersonService:
                 purpose=purpose,
                 creation_basis=creation_basis,
             )
+            if current is not None:
+                existing = path.read_text(encoding="utf-8")
+                metadata, _body = _frontmatter(existing, path)
+                expected = {
+                    "person_id": person_id,
+                    "title": title,
+                    "person_kind": person_kind,
+                    "relationship_to_owner": relationship_to_owner,
+                    "purpose": purpose,
+                    "card_creation_basis": creation_basis,
+                }
+                if any(metadata.get(key) != value for key, value in expected.items()):
+                    raise WoonError(
+                        "existing person card requires a reviewed native Wiki update; "
+                        "preserve its facts and source links"
+                    )
+                content = existing
             changed = not path.exists() or path.read_text(encoding="utf-8") != content
             if changed:
                 atomic_write(path, content.encode("utf-8"))
@@ -978,6 +1008,12 @@ def _render_card(
         "status": "Active",
         "lifecycle": "active",
         "canonical_id": f"personal/{person_id}",
+        "domain": "personal",
+        "summary": relationship_to_owner,
+        "purpose": purpose,
+        "record_owner": _DEFAULT_OWNER_ID,
+        "lifecycle_status": "active",
+        "central_question": f"{title}의 확인된 정보와 관련 자료는 무엇인가?",
         "facets": ["인물"],
         "knowledge_state": "확인 필요",
         "state_reason": "explicit-or-repeated-person-evidence",
@@ -1016,7 +1052,11 @@ def _render_card(
     yaml_text = yaml.safe_dump(
         frontmatter, allow_unicode=True, sort_keys=False, default_flow_style=False
     )
-    return f"---\n{yaml_text}---\n\n# {title}\n"
+    return (
+        f"---\n{yaml_text}---\n\n# {title}\n\n## 현재 정리\n\n"
+        f"{relationship_to_owner}\n\n{purpose}\n\n"
+        "## 연결 문서 조회\n\n![[inbox/person-indexed-docs.base]]\n"
+    )
 
 
 def _record_operation(path: Path, *, operation: str, payload: dict[str, object]) -> None:

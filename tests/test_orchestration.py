@@ -5,10 +5,6 @@ import pytest
 
 from woon_core.errors import WoonError
 from woon_core.knowledge.orchestration import (
-    _AUTOMATION_PERSON_PROMPT_GUARD_TERMS,
-    AutomationContract,
-    _has_person_protection,
-    _validate_wiki_prompt_contract,
     load_orchestrator_settings,
     verify_codex_automation_registry,
 )
@@ -71,10 +67,7 @@ global_guards:
     public_publish_requires_separate_authorization: true
   schedule_bridge:
     auto_apply_allowlisted_datetime_mail_only: false
-    schedule_apply_path: local-user-authorized
-    calendar_name: Woon 일정
-    manual_apply_command: native-local-command
-    native_adapters: [eventkit-full-access]
+    calendar_provider: google-calendar
     state_path: .local/woon-knowledge/schedule-bridge-state.json
 identity:
   schema_path: config/person-schema.json
@@ -128,10 +121,6 @@ daily_document_pipeline:
       owner: daily-record-materialization
       marker: woon-codex-digest
       proof: .local/woon-knowledge/automation-receipts/daily-record-materialization
-    - id: calendar-projection
-      owner: woon-calendar-service
-      marker: "woon_projection: apple-calendar"
-      proof: output-hash-and-reread
     - id: activity-review
       owner: activity-history-review
       marker: review-only
@@ -392,110 +381,6 @@ prompt = \"Run an unsafe unbounded lane.\"
         verify_codex_automation_registry(settings, tmp_path / "automations")
 
 
-def test_rejects_registered_heartbeat_without_person_protection(tmp_path: Path) -> None:
-    unsafe_prompt = "Run only the policy-approved candidate lane."
-    write_policy(
-        tmp_path,
-        status="enabled",
-        thread_id='"thread-001"',
-        codex_automation_id='"codex-001"',
-        rrule='"FREQ=DAILY;BYHOUR=6;BYMINUTE=0;BYSECOND=0"',
-        notification_policy='"failed_runs_only"',
-        prompt_sha256=f'"{hashlib.sha256(unsafe_prompt.encode()).hexdigest()}"',
-    )
-    settings = load_orchestrator_settings(tmp_path)
-    registry = tmp_path / "automations" / "codex-001"
-    registry.mkdir(parents=True)
-    (registry / "automation.toml").write_text(
-        f'''id = "codex-001"
-kind = "heartbeat"
-status = "ACTIVE"
-target_thread_id = "thread-001"
-rrule = "FREQ=DAILY;BYHOUR=6;BYMINUTE=0;BYSECOND=0"
-notification_policy = "failed_runs_only"
-prompt = "{unsafe_prompt}"
-''',
-        encoding="utf-8",
-    )
-
-    with pytest.raises(WoonError, match="person protection"):
-        verify_codex_automation_registry(settings, tmp_path / "automations")
-
-    assert "인물 카드" in _AUTOMATION_PERSON_PROMPT_GUARD_TERMS[4]
-
-
-def test_accepts_person_protection_with_safe_punctuation_variants() -> None:
-    prompt = (
-        "인물 이름, 저자, 자료 제공자, 참석자가 나타나도 외부 인물의 people, "
-        "person_roles, attributions, 인물 카드를 자동으로 만들거나 바꾸지 말고 "
-        "관계와 신상을 추정하지 마라. Novel과 private 원본의 인물은 읽거나 "
-        "일반 인물 지도와 검색에 넣지 마라."
-    )
-
-    assert _has_person_protection(prompt)
-
-
-def _prompt_contract(automation_id: str) -> AutomationContract:
-    return AutomationContract(
-        automation_id=automation_id,
-        owner="fixture-owner",
-        cadence="daily",
-        inputs=("fixture-input",),
-        outputs=("fixture-output",),
-        checkpoint_key=f"{automation_id}-checkpoint",
-        required_signals=("fixture-signal",),
-        prohibited=("person-profile-inference", "unresolved-identity-link"),
-        mode="materialize",
-        status="enabled",
-        task_thread_id="fixture-thread",
-        codex_automation_id="fixture-automation",
-        rrule="FREQ=DAILY;BYHOUR=1",
-        notification_policy="failed_runs_only",
-        prompt_sha256="a" * 64,
-        owned_paths=("wiki",),
-    )
-
-
-def test_rejects_retired_wiki_fields_in_enabled_automation_prompts() -> None:
-    with pytest.raises(WoonError, match="retired Wiki term parent_topics"):
-        _validate_wiki_prompt_contract(
-            _prompt_contract("codex-conversation-ingest"),
-            "new_wiki_reason parent_topics parent keywords central_question wiki/** "
-            "일일 기록은 Wiki 승격 입력이 아니다",
-        )
-
-
-def test_accepts_new_single_wiki_prompt_contracts() -> None:
-    _validate_wiki_prompt_contract(
-        _prompt_contract("codex-conversation-ingest"),
-        "new_wiki_reason parent keywords central_question wiki/** "
-        "일일 기록은 Wiki 승격 입력이 아니다 "
-        "작은 순수 분류 허브는 일반 텍스트 불릿 아래 직접 하위 키워드 링크 "
-        "direct child가 2개 이상이면 navigation_groups "
-        "콘텐츠 subtree와 Facet 탐색 페이지를 만들지 않는다 "
-        "facets metadata는 분류 보조 속성 resource_keyword "
-        "책 → 장르 키워드 → 책 제목 리소스 → 주제 텍스트 → 들여쓴 원자료 링크 "
-        "lifecycle_status started_on ended_on occurred_on wiki/private/_sources/codex "
-        "Vault 밖 별도 source archive를 만들지 않는다",
-    )
-    _validate_wiki_prompt_contract(
-        _prompt_contract("knowledge-curation"),
-        "canonical_id parent keywords view_mode 하위 키워드 최신 문서 wiki/README.md "
-        "작은 순수 분류 허브는 일반 텍스트 불릿 아래 직접 하위 키워드 링크 "
-        "direct child가 2개 이상이면 navigation_groups "
-        "콘텐츠 subtree와 Facet 탐색 페이지가 없는지 "
-        "facets metadata는 분류 보조 속성 "
-        "책 → 장르 키워드 → 책 제목 리소스 → 주제 텍스트 → 들여쓴 원자료 링크 "
-        "lifecycle_status started_on ended_on occurred_on wiki/private/_sources "
-        "Vault 밖 별도 보관소",
-    )
-    _validate_wiki_prompt_contract(
-        _prompt_contract("daily-record-materialization"),
-        "Wiki 문서를 새로 만들지 않는다. 단계별 검증만 하며 전체 완료 receipt를 만들지 않는다. "
-        "일일 기록은 Wiki 승격 입력이 아니다. wiki/private/_sources/codex와 자유 메모를 구분한다.",
-    )
-
-
 def test_daily_pipeline_forbids_promoting_daily_notes_back_into_wiki(tmp_path: Path) -> None:
     write_policy(tmp_path)
     path = tmp_path / "config/second-brain-orchestrator.yaml"
@@ -516,7 +401,7 @@ def test_daily_pipeline_forbids_promoting_daily_notes_back_into_wiki(tmp_path: P
       rrule: null
       notification_policy: null
       prompt_sha256: null
-      owned_paths: [inbox/daily, inbox/calendar, brain/review/activity]
+      owned_paths: [inbox/daily, brain/review/activity]
 """
     policy = path.read_text(encoding="utf-8").replace(
         "cursor_contract:\n", daily_lane + "cursor_contract:\n"

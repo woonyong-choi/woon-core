@@ -164,6 +164,115 @@ def audit_book_coverage(vault: Path) -> BookCoverageAudit:
     return _audit_book_coverage(vault)
 
 
+def navigation_group_scope_nodes(base: dict[str, Any], root_id: str) -> frozenset[str]:
+    """Resolve a virtual chapter scope from its pinned source chapter.
+
+    A path prefix alone is not evidence of a chapter. Its complete node set
+    must belong to exactly one source chapter delivered by its book root.
+    Reader proof is checked by the coverage audit, not by this node resolver.
+    An empty result means no safe virtual scope was found.
+    """
+
+    book_id = base.get("book_id")
+    elements = base.get("source_structure_elements")
+    assignments = base.get("source_structure_assignments")
+    nodes = base.get("nodes")
+    if (
+        not isinstance(book_id, str)
+        or not root_id.startswith(book_id + "/")
+        or not isinstance(elements, list)
+        or not isinstance(assignments, list)
+        or not isinstance(nodes, list)
+    ):
+        return frozenset()
+    by_structure: dict[str, dict[str, Any]] = {}
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            return frozenset()
+        identity = assignment.get("structure_id")
+        if not isinstance(identity, str) or identity in by_structure:
+            return frozenset()
+        by_structure[identity] = assignment
+    node_ids = {
+        node_id
+        for node in nodes
+        if isinstance(node, dict)
+        and isinstance(node_id := node.get("canonical_id"), str)
+        and node_id.strip()
+    }
+    if len(node_ids) != len(nodes):
+        return frozenset()
+    if root_id in node_ids:
+        return frozenset()
+    expected = {
+        node_id
+        for node_id in node_ids
+        if isinstance(node_id, str) and node_id.startswith(root_id + "/")
+    }
+    if not expected:
+        return frozenset()
+    matches: list[frozenset[str]] = []
+    chapter_order = 0
+    for index, element in enumerate(elements):
+        if not isinstance(element, dict) or element.get("kind") != "chapter":
+            continue
+        chapter_order += 1
+        identity = element.get("structure_id")
+        if not isinstance(identity, str):
+            return frozenset()
+        assignment = by_structure.get(identity, {})
+        order = assignment.get("source_order")
+        disposition = assignment.get("disposition")
+        if (
+            assignment.get("owner_id") != book_id
+            or not element.get("title")
+            or not isinstance(order, int)
+            or isinstance(order, bool)
+        ):
+            continue
+        if disposition == "navigation-group-heading":
+            if assignment.get("label") != element.get("title") or order != chapter_order:
+                continue
+        elif disposition == "private-reader":
+            if order != index + 1:
+                continue
+        else:
+            continue
+        children: list[str] = []
+        valid = True
+        for child_index, child in enumerate(elements[index + 1 :], index + 2):
+            if not isinstance(child, dict):
+                valid = False
+                break
+            if child.get("kind") in {"chapter", "part", "appendix", "back-matter"}:
+                break
+            child_identity = child.get("structure_id")
+            if not isinstance(child_identity, str):
+                valid = False
+                break
+            delivery = by_structure.get(child_identity, {})
+            if delivery.get("disposition") in {"book-root-heading", "private-reader"}:
+                if (
+                    delivery.get("owner_id") != book_id
+                    or type(delivery.get("source_order")) is not int
+                    or delivery.get("source_order") != child_index
+                ):
+                    valid = False
+                    break
+                continue
+            if delivery.get("disposition") != "canonical-node":
+                valid = False
+                break
+            child_id = delivery.get("canonical_id")
+            if not isinstance(child_id, str) or child_id not in expected:
+                valid = False
+                break
+            children.append(child_id)
+        if valid and len(children) == len(set(children)) and set(children) == expected:
+            matches.append(frozenset(children))
+    return matches[0] if len(matches) == 1 else frozenset()
+
+
 def audit_book_coverage_scope(vault: Path, relative_path: str) -> BookCoverageAudit:
     """Audit one staged schema-v2 scope without judging unfinished sibling chapters."""
 
@@ -1185,6 +1294,170 @@ def _canonical_parent(value: object) -> str:
 def _reader_body(body: str) -> str:
     body = strip_generated_wiki_views(body)
     return re.sub(r"(?m)^# .+?\s*$", "", body, count=1)
+
+
+def _audit_navigation_delivery(
+    vault: Path | None,
+    book_id: str,
+    assignment: dict[str, Any],
+    element: dict[str, Any],
+    pages: dict[str, tuple[Path, dict[str, Any], str]],
+    *,
+    source_order: int,
+) -> tuple[int, str, int]:
+    """Validate navigation delivery; this does not grant content coverage."""
+    disposition = assignment.get("disposition")
+    fields = {"structure_id", "disposition", "owner_id", "heading", "source_order"}
+    if disposition == "private-reader":
+        fields |= {"reader_path", "reader_anchor", "reader_sha256", "body_sha256"}
+        if "heading_review" in assignment:
+            fields.add("heading_review")
+    if set(assignment) != fields or assignment.get("owner_id") != book_id:
+        raise WoonError("navigation delivery requires the exact book root and proof fields")
+    if (
+        type(assignment.get("source_order")) is not int
+        or assignment["source_order"] != source_order
+    ):
+        raise WoonError("navigation delivery source_order must match the source inventory position")
+    root = pages.get(book_id)
+    if (
+        root is None
+        or root[1].get("entity_kind") != "book"
+        or root[1].get("publish") is not False
+        or root[1].get("access") != "local-only"
+    ):
+        raise WoonError("navigation delivery requires an existing private book root")
+    heading = assignment.get("heading")
+    title = _text(element.get("title"))
+    if not isinstance(heading, str) or not title:
+        raise WoonError("navigation delivery requires an exact source heading")
+    root_body = _reader_body(root[2])
+    if disposition == "book-root-heading":
+        if heading not in (f"## {title}", f"### {title}"):
+            raise WoonError("book-root heading must be the exact source H2 or H3")
+        if root_body.splitlines().count(heading) != 1:
+            raise WoonError("book-root heading must occur exactly once")
+        return root_body.splitlines().index(heading), "", 0
+    if vault is None:
+        raise WoonError("private reader verification requires the Vault root")
+    relative = assignment.get("reader_path")
+    candidate = Path(relative) if isinstance(relative, str) else Path()
+    if (
+        not isinstance(relative, str)
+        or not relative.startswith("private/")
+        or candidate.suffix != ".md"
+        or candidate.as_posix() != relative
+        or any(part in {".", ".."} for part in candidate.parts)
+        or any(char in relative for char in "\\#?\x00")
+    ):
+        raise WoonError("private reader must be one exact private Markdown path")
+    if any((vault / part).is_symlink() for part in (candidate, *candidate.parents)):
+        raise WoonError("private reader must not use symlinks")
+    try:
+        raw = (vault / candidate).read_bytes()
+    except OSError as error:
+        raise WoonError("private reader is missing") from error
+    if hashlib.sha256(raw).hexdigest() != assignment.get("reader_sha256"):
+        raise WoonError("private reader SHA-256 differs")
+    text = raw.decode("utf-8")
+    # Raw private book readers have no Wiki frontmatter. Their existing private
+    # path and private root own visibility; do not rewrite source bytes to add it.
+    metadata, body = split_markdown(text) if text.startswith("---\n") else ({}, text)
+    if metadata and (
+        metadata.get("publish") is not False
+        or metadata.get("access") != "local-only"
+        or metadata.get("publication_state", "private") != "private"
+    ):
+        raise WoonError("private reader publication boundary differs")
+    match_heading = re.fullmatch(r"(#{1,6}) ([^\n]+)", heading)
+    if match_heading is None:
+        raise WoonError("private reader requires an actual Markdown heading")
+    reader_title = match_heading.group(2)
+    if reader_title != title:
+        review = assignment.get("heading_review")
+        source_number = re.match(r"^\d+(?:\.\d+)*\b", title)
+        reader_number = re.match(r"^\d+(?:\.\d+)*\b", reader_title)
+        if (
+            not isinstance(review, dict)
+            or set(review) != {"source_title", "reader_title", "basis"}
+            or review.get("source_title") != title
+            or review.get("reader_title") != reader_title
+            or not _text(review.get("basis"))
+            or source_number is None
+            or reader_number is None
+            or source_number.group() != reader_number.group()
+        ):
+            raise WoonError("different reader title requires an exact reviewed numbered mapping")
+    elif "heading_review" in assignment:
+        raise WoonError("heading_review is only allowed for differing source and reader titles")
+    lines = body.splitlines()
+    actual_headings: list[tuple[int, str]] = []
+    fence = ""
+    for index, line in enumerate(lines):
+        marker = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        if marker:
+            run = marker.group(1)
+            if not fence:
+                fence = run
+            elif run[0] == fence[0] and len(run) >= len(fence):
+                fence = ""
+        elif not fence and re.match(r"^#{1,6} ", line):
+            actual_headings.append((index, line))
+    positions = [index for index, line in actual_headings if line == heading]
+    if len(positions) != 1:
+        raise WoonError("private reader heading must occur exactly once outside code fences")
+    start = positions[0]
+    level = len(match_heading.group(1))
+    end = next(
+        (
+            index
+            for index, line in actual_headings
+            if index > start and len(line.split(" ", 1)[0]) <= level
+        ),
+        len(lines),
+    )
+    delivered = "\n".join(lines[start + 1 : end]).strip()
+    if not delivered or hashlib.sha256(delivered.encode()).hexdigest() != assignment.get(
+        "body_sha256"
+    ):
+        raise WoonError("private reader section body is missing or its SHA-256 differs")
+    visible = re.sub(r"<!--[\s\S]*?-->", "", delivered)
+    if not any(
+        line.strip()
+        and not re.fullmatch(
+            r"\s*(?:#{1,6}\s+.+|[-*]\s+(?:\[\[[^\]]+\]\]|\[[^\]]+\]\([^)]+\)))\s*",
+            line,
+        )
+        for line in visible.splitlines()
+    ):
+        raise WoonError("private reader section contains navigation only")
+    anchor = assignment.get("reader_anchor")
+    if not isinstance(anchor, str) or (anchor and anchor != reader_title):
+        raise WoonError("private reader anchor must be empty or the exact delivered heading text")
+    if not anchor and level != 1:
+        raise WoonError("a section below H1 requires its explicit reader heading anchor")
+    # Reuse the shared reader target policy for each matching link, including anchors.
+    links = []
+    pattern = r"(?:#{2,3} |\s*- )?(\[[^\]\n]+\]\((<[^<>\n]+>|[^()\n]+)\))"
+    for index, line in enumerate(root_body.splitlines()):
+        match = re.fullmatch(pattern, line)
+        if match is None:
+            continue
+        raw_target = match.group(2)
+        target = unquote(raw_target[1:-1] if raw_target.startswith("<") else raw_target)
+        location, separator, target_anchor = target.partition("#")
+        if (
+            target_anchor != anchor
+            or bool(separator) != bool(anchor)
+            or (root[0].parent / location).resolve() != (vault / candidate).resolve()
+        ):
+            continue
+        verified = private_reader_target(vault, root[0], root[1], match.group(1))
+        if verified == (vault / candidate).resolve():
+            links.append(index)
+    if len(links) != 1:
+        raise WoonError("private reader delivery must be linked exactly once from its book root")
+    return links[0], relative, start
 
 
 def _audit_source_structure_contract(
@@ -2627,6 +2900,149 @@ def _audit_static_exception(
     return f"{language}#{block_index}|{harness_language}#{harness_block_index}"
 
 
+def static_parts_payload(
+    assignment: dict[str, Any], reader_body: str
+) -> tuple[str, tuple[str, ...]]:
+    """Read ordered static fences and verify each part and the joined payload.
+
+    A part addresses one page-local language/index pair. No source IDs, code
+    bytes, classifications or execution receipts are created or changed here.
+    Invalid shape, ordering, missing blocks or changed hashes raise WoonError.
+    """
+    parts = assignment.get("static_parts")
+    if (
+        not isinstance(parts, list)
+        or len(parts) < 2
+        or "static_language" in assignment
+        or "static_block_index" in assignment
+    ):
+        raise WoonError("static_parts requires at least two parts instead of single-fence fields")
+    fences: dict[tuple[str, int], tuple[int, str]] = {}
+    counts: dict[str, int] = {}
+    for match in _FENCE_BLOCK.finditer(reader_body):
+        language = match["language"]
+        counts[language] = counts.get(language, 0) + 1
+        fences[(language, counts[language])] = (match.start(), match["body"])
+    payload: list[str] = []
+    signatures: list[str] = []
+    previous_position = -1
+    for part in parts:
+        if not isinstance(part, dict) or set(part) != {"language", "block_index", "body_sha256"}:
+            raise WoonError("static_parts entries require language, block_index and body_sha256")
+        language, index = part["language"], part["block_index"]
+        if (
+            not isinstance(language, str)
+            or re.fullmatch(r"[A-Za-z0-9_+-]+", language) is None
+            or language.startswith("run-")
+            or type(index) is not int
+            or index < 1
+        ):
+            raise WoonError("static_parts must reference non-run languages and positive indices")
+        fence = fences.get((language, index))
+        if fence is None:
+            raise WoonError("static_parts references a missing reader fence")
+        position, body = fence
+        if position <= previous_position:
+            raise WoonError("static_parts reader positions must be ordered and unique")
+        if not body.strip() or hashlib.sha256(body.encode()).hexdigest() != part["body_sha256"]:
+            raise WoonError("static_parts body_sha256 differs from a non-empty exact fence")
+        previous_position = position
+        payload.append(body)
+        signatures.append(f"{language}#{index}")
+    joined = "".join(payload)
+    if hashlib.sha256(joined.encode()).hexdigest() != assignment.get("static_body_sha256"):
+        raise WoonError("static_parts joined payload differs from static_body_sha256")
+    return joined, tuple(signatures)
+
+
+def validate_static_parts_source_evidence(
+    vault: Path, element: dict[str, Any], assignment: dict[str, Any], payload: str
+) -> None:
+    """Bind displayed parts to one hash-pinned, reviewed extraction record.
+
+    This reads existing source-blocks evidence; it never re-extracts the book
+    or treats print callouts in an older reader as executable source bytes.
+    """
+    proof = assignment.get("source_payload_evidence")
+    if isinstance(proof, dict) and set(proof) == {"source_mapping_evidence"}:
+        static_parts_source_mapping(
+            vault, proof["source_mapping_evidence"], element, assignment["owner_id"], payload
+        )
+        return
+    if not isinstance(proof, dict) or set(proof) != {
+        "relative_path",
+        "sha256",
+        "block_id",
+        "canonical_locator",
+        "extracted_locator",
+    }:
+        raise WoonError("static_parts source_payload_evidence fields are invalid")
+    relative, digest, block_id = proof["relative_path"], proof["sha256"], proof["block_id"]
+    if (
+        not isinstance(relative, str)
+        or not relative.startswith("private/")
+        or "\\" in relative
+        or Path(relative).as_posix() != relative
+        or ".." in Path(relative).parts
+        or not isinstance(digest, str)
+        or _LOWER_SHA256.fullmatch(digest) is None
+        or not isinstance(block_id, str)
+        or not block_id
+    ):
+        raise WoonError(
+            "static_parts source evidence requires a private Vault path, hash and block ID"
+        )
+    parts = Path(relative).parts
+    if any((vault / Path(*parts[:i])).is_symlink() for i in range(1, len(parts) + 1)):
+        raise WoonError("static_parts source evidence must not traverse symlinks")
+    try:
+        raw = (vault / relative).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise WoonError("static_parts source evidence file hash differs")
+        records = json.loads(raw)
+    except (OSError, ValueError) as error:
+        raise WoonError("static_parts source evidence file is unreadable") from error
+    if not isinstance(records, list):
+        raise WoonError("static_parts source evidence must contain source-block records")
+    matches = [row for row in records if isinstance(row, dict) and row.get("id") == block_id]
+    if len(matches) != 1:
+        raise WoonError("static_parts source evidence block ID must occur exactly once")
+    record = matches[0]
+    markdown = record.get("english_md")
+    canonical, extracted = proof["canonical_locator"], proof["extracted_locator"]
+    same_source = canonical == extracted
+    if isinstance(canonical, str) and isinstance(extracted, str) and not same_source:
+        old_address = re.fullmatch(r"(.+):(block|dom-child)-[0-9]+", canonical)
+        new_address = re.fullmatch(r"(.+):(block|dom-child)-[0-9]+", extracted)
+        same_source = bool(
+            old_address
+            and new_address
+            and old_address[1] == new_address[1]
+            and old_address[2] != new_address[2]
+        )
+    if (
+        not isinstance(canonical, str)
+        or not canonical
+        or not same_source
+        or canonical != element.get("source_locator")
+        or extracted != record.get("source_locator")
+        or record.get("kind") != "code"
+        or record.get("source_html_sha256") != element.get("source_sha256")
+        or not isinstance(markdown, str)
+        or hashlib.sha256(markdown.encode()).hexdigest() != record.get("english_md_sha256")
+    ):
+        raise WoonError("static_parts source record identity or Markdown hash differs")
+    source_parts: list[str] = []
+    cursor = 0
+    for fence in _FENCE_BLOCK.finditer(markdown):
+        if markdown[cursor : fence.start()].strip():
+            raise WoonError("static_parts source code record contains uncovered prose")
+        source_parts.append(fence["body"])
+        cursor = fence.end()
+    if not source_parts or markdown[cursor:].strip() or "".join(source_parts) != payload:
+        raise WoonError("static_parts payload differs from the pinned source extraction")
+
+
 def _audit_static_source_assignment(
     label: str,
     element: dict[str, Any],
@@ -3508,419 +3924,3 @@ def _lane_audits(errors: list[str]) -> dict[str, BookCoverageLaneAudit]:
         )
         for lane, lane_errors in grouped.items()
     }
-
-
-def navigation_group_scope_nodes(base: dict[str, Any], root_id: str) -> frozenset[str]:
-    """Resolve a virtual chapter scope from its pinned source chapter.
-
-    A path prefix alone is not evidence of a chapter. Its complete node set
-    must belong to exactly one source chapter delivered by its book root.
-    Reader proof is checked by the coverage audit, not by this node resolver.
-    An empty result means no safe virtual scope was found.
-    """
-
-    book_id = base.get("book_id")
-    elements = base.get("source_structure_elements")
-    assignments = base.get("source_structure_assignments")
-    nodes = base.get("nodes")
-    if (
-        not isinstance(book_id, str)
-        or not root_id.startswith(book_id + "/")
-        or not isinstance(elements, list)
-        or not isinstance(assignments, list)
-        or not isinstance(nodes, list)
-    ):
-        return frozenset()
-    by_structure: dict[str, dict[str, Any]] = {}
-    for assignment in assignments:
-        if not isinstance(assignment, dict):
-            return frozenset()
-        identity = assignment.get("structure_id")
-        if not isinstance(identity, str) or identity in by_structure:
-            return frozenset()
-        by_structure[identity] = assignment
-    node_ids = {
-        node_id
-        for node in nodes
-        if isinstance(node, dict)
-        and isinstance(node_id := node.get("canonical_id"), str)
-        and node_id.strip()
-    }
-    if len(node_ids) != len(nodes):
-        return frozenset()
-    if root_id in node_ids:
-        return frozenset()
-    expected = {
-        node_id
-        for node_id in node_ids
-        if isinstance(node_id, str) and node_id.startswith(root_id + "/")
-    }
-    if not expected:
-        return frozenset()
-    matches: list[frozenset[str]] = []
-    chapter_order = 0
-    for index, element in enumerate(elements):
-        if not isinstance(element, dict) or element.get("kind") != "chapter":
-            continue
-        chapter_order += 1
-        identity = element.get("structure_id")
-        if not isinstance(identity, str):
-            return frozenset()
-        assignment = by_structure.get(identity, {})
-        order = assignment.get("source_order")
-        disposition = assignment.get("disposition")
-        if (
-            assignment.get("owner_id") != book_id
-            or not element.get("title")
-            or not isinstance(order, int)
-            or isinstance(order, bool)
-        ):
-            continue
-        if disposition == "navigation-group-heading":
-            if assignment.get("label") != element.get("title") or order != chapter_order:
-                continue
-        elif disposition == "private-reader":
-            if order != index + 1:
-                continue
-        else:
-            continue
-        children: list[str] = []
-        valid = True
-        for child_index, child in enumerate(elements[index + 1 :], index + 2):
-            if not isinstance(child, dict):
-                valid = False
-                break
-            if child.get("kind") in {"chapter", "part", "appendix", "back-matter"}:
-                break
-            child_identity = child.get("structure_id")
-            if not isinstance(child_identity, str):
-                valid = False
-                break
-            delivery = by_structure.get(child_identity, {})
-            if delivery.get("disposition") in {"book-root-heading", "private-reader"}:
-                if (
-                    delivery.get("owner_id") != book_id
-                    or type(delivery.get("source_order")) is not int
-                    or delivery.get("source_order") != child_index
-                ):
-                    valid = False
-                    break
-                continue
-            if delivery.get("disposition") != "canonical-node":
-                valid = False
-                break
-            child_id = delivery.get("canonical_id")
-            if not isinstance(child_id, str) or child_id not in expected:
-                valid = False
-                break
-            children.append(child_id)
-        if valid and len(children) == len(set(children)) and set(children) == expected:
-            matches.append(frozenset(children))
-    return matches[0] if len(matches) == 1 else frozenset()
-
-
-def _audit_navigation_delivery(
-    vault: Path | None,
-    book_id: str,
-    assignment: dict[str, Any],
-    element: dict[str, Any],
-    pages: dict[str, tuple[Path, dict[str, Any], str]],
-    *,
-    source_order: int,
-) -> tuple[int, str, int]:
-    """Validate navigation delivery; this does not grant content coverage."""
-    disposition = assignment.get("disposition")
-    fields = {"structure_id", "disposition", "owner_id", "heading", "source_order"}
-    if disposition == "private-reader":
-        fields |= {"reader_path", "reader_anchor", "reader_sha256", "body_sha256"}
-        if "heading_review" in assignment:
-            fields.add("heading_review")
-    if set(assignment) != fields or assignment.get("owner_id") != book_id:
-        raise WoonError("navigation delivery requires the exact book root and proof fields")
-    if (
-        type(assignment.get("source_order")) is not int
-        or assignment["source_order"] != source_order
-    ):
-        raise WoonError("navigation delivery source_order must match the source inventory position")
-    root = pages.get(book_id)
-    if (
-        root is None
-        or root[1].get("entity_kind") != "book"
-        or root[1].get("publish") is not False
-        or root[1].get("access") != "local-only"
-    ):
-        raise WoonError("navigation delivery requires an existing private book root")
-    heading = assignment.get("heading")
-    title = _text(element.get("title"))
-    if not isinstance(heading, str) or not title:
-        raise WoonError("navigation delivery requires an exact source heading")
-    root_body = _reader_body(root[2])
-    if disposition == "book-root-heading":
-        if heading not in (f"## {title}", f"### {title}"):
-            raise WoonError("book-root heading must be the exact source H2 or H3")
-        if root_body.splitlines().count(heading) != 1:
-            raise WoonError("book-root heading must occur exactly once")
-        return root_body.splitlines().index(heading), "", 0
-    if vault is None:
-        raise WoonError("private reader verification requires the Vault root")
-    relative = assignment.get("reader_path")
-    candidate = Path(relative) if isinstance(relative, str) else Path()
-    if (
-        not isinstance(relative, str)
-        or not relative.startswith("private/")
-        or candidate.suffix != ".md"
-        or candidate.as_posix() != relative
-        or any(part in {".", ".."} for part in candidate.parts)
-        or any(char in relative for char in "\\#?\x00")
-    ):
-        raise WoonError("private reader must be one exact private Markdown path")
-    if any((vault / part).is_symlink() for part in (candidate, *candidate.parents)):
-        raise WoonError("private reader must not use symlinks")
-    try:
-        raw = (vault / candidate).read_bytes()
-    except OSError as error:
-        raise WoonError("private reader is missing") from error
-    if hashlib.sha256(raw).hexdigest() != assignment.get("reader_sha256"):
-        raise WoonError("private reader SHA-256 differs")
-    text = raw.decode("utf-8")
-    # Raw private book readers have no Wiki frontmatter. Their existing private
-    # path and private root own visibility; do not rewrite source bytes to add it.
-    metadata, body = split_markdown(text) if text.startswith("---\n") else ({}, text)
-    if metadata and (
-        metadata.get("publish") is not False
-        or metadata.get("access") != "local-only"
-        or metadata.get("publication_state", "private") != "private"
-    ):
-        raise WoonError("private reader publication boundary differs")
-    match_heading = re.fullmatch(r"(#{1,6}) ([^\n]+)", heading)
-    if match_heading is None:
-        raise WoonError("private reader requires an actual Markdown heading")
-    reader_title = match_heading.group(2)
-    if reader_title != title:
-        review = assignment.get("heading_review")
-        source_number = re.match(r"^\d+(?:\.\d+)*\b", title)
-        reader_number = re.match(r"^\d+(?:\.\d+)*\b", reader_title)
-        if (
-            not isinstance(review, dict)
-            or set(review) != {"source_title", "reader_title", "basis"}
-            or review.get("source_title") != title
-            or review.get("reader_title") != reader_title
-            or not _text(review.get("basis"))
-            or source_number is None
-            or reader_number is None
-            or source_number.group() != reader_number.group()
-        ):
-            raise WoonError("different reader title requires an exact reviewed numbered mapping")
-    elif "heading_review" in assignment:
-        raise WoonError("heading_review is only allowed for differing source and reader titles")
-    lines = body.splitlines()
-    actual_headings: list[tuple[int, str]] = []
-    fence = ""
-    for index, line in enumerate(lines):
-        marker = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
-        if marker:
-            run = marker.group(1)
-            if not fence:
-                fence = run
-            elif run[0] == fence[0] and len(run) >= len(fence):
-                fence = ""
-        elif not fence and re.match(r"^#{1,6} ", line):
-            actual_headings.append((index, line))
-    positions = [index for index, line in actual_headings if line == heading]
-    if len(positions) != 1:
-        raise WoonError("private reader heading must occur exactly once outside code fences")
-    start = positions[0]
-    level = len(match_heading.group(1))
-    end = next(
-        (
-            index
-            for index, line in actual_headings
-            if index > start and len(line.split(" ", 1)[0]) <= level
-        ),
-        len(lines),
-    )
-    delivered = "\n".join(lines[start + 1 : end]).strip()
-    if not delivered or hashlib.sha256(delivered.encode()).hexdigest() != assignment.get(
-        "body_sha256"
-    ):
-        raise WoonError("private reader section body is missing or its SHA-256 differs")
-    visible = re.sub(r"<!--[\s\S]*?-->", "", delivered)
-    if not any(
-        line.strip()
-        and not re.fullmatch(
-            r"\s*(?:#{1,6}\s+.+|[-*]\s+(?:\[\[[^\]]+\]\]|\[[^\]]+\]\([^)]+\)))\s*",
-            line,
-        )
-        for line in visible.splitlines()
-    ):
-        raise WoonError("private reader section contains navigation only")
-    anchor = assignment.get("reader_anchor")
-    if not isinstance(anchor, str) or (anchor and anchor != reader_title):
-        raise WoonError("private reader anchor must be empty or the exact delivered heading text")
-    if not anchor and level != 1:
-        raise WoonError("a section below H1 requires its explicit reader heading anchor")
-    # Reuse the shared reader target policy for each matching link, including anchors.
-    links = []
-    pattern = r"(?:#{2,3} |\s*- )?(\[[^\]\n]+\]\((<[^<>\n]+>|[^()\n]+)\))"
-    for index, line in enumerate(root_body.splitlines()):
-        match = re.fullmatch(pattern, line)
-        if match is None:
-            continue
-        raw_target = match.group(2)
-        target = unquote(raw_target[1:-1] if raw_target.startswith("<") else raw_target)
-        location, separator, target_anchor = target.partition("#")
-        if (
-            target_anchor != anchor
-            or bool(separator) != bool(anchor)
-            or (root[0].parent / location).resolve() != (vault / candidate).resolve()
-        ):
-            continue
-        verified = private_reader_target(vault, root[0], root[1], match.group(1))
-        if verified == (vault / candidate).resolve():
-            links.append(index)
-    if len(links) != 1:
-        raise WoonError("private reader delivery must be linked exactly once from its book root")
-    return links[0], relative, start
-
-
-def static_parts_payload(
-    assignment: dict[str, Any], reader_body: str
-) -> tuple[str, tuple[str, ...]]:
-    """Read ordered static fences and verify each part and the joined payload.
-
-    A part addresses one page-local language/index pair. No source IDs, code
-    bytes, classifications or execution receipts are created or changed here.
-    Invalid shape, ordering, missing blocks or changed hashes raise WoonError.
-    """
-    parts = assignment.get("static_parts")
-    if (
-        not isinstance(parts, list)
-        or len(parts) < 2
-        or "static_language" in assignment
-        or "static_block_index" in assignment
-    ):
-        raise WoonError("static_parts requires at least two parts instead of single-fence fields")
-    fences: dict[tuple[str, int], tuple[int, str]] = {}
-    counts: dict[str, int] = {}
-    for match in _FENCE_BLOCK.finditer(reader_body):
-        language = match["language"]
-        counts[language] = counts.get(language, 0) + 1
-        fences[(language, counts[language])] = (match.start(), match["body"])
-    payload: list[str] = []
-    signatures: list[str] = []
-    previous_position = -1
-    for part in parts:
-        if not isinstance(part, dict) or set(part) != {"language", "block_index", "body_sha256"}:
-            raise WoonError("static_parts entries require language, block_index and body_sha256")
-        language, index = part["language"], part["block_index"]
-        if (
-            not isinstance(language, str)
-            or re.fullmatch(r"[A-Za-z0-9_+-]+", language) is None
-            or language.startswith("run-")
-            or type(index) is not int
-            or index < 1
-        ):
-            raise WoonError("static_parts must reference non-run languages and positive indices")
-        fence = fences.get((language, index))
-        if fence is None:
-            raise WoonError("static_parts references a missing reader fence")
-        position, body = fence
-        if position <= previous_position:
-            raise WoonError("static_parts reader positions must be ordered and unique")
-        if not body.strip() or hashlib.sha256(body.encode()).hexdigest() != part["body_sha256"]:
-            raise WoonError("static_parts body_sha256 differs from a non-empty exact fence")
-        previous_position = position
-        payload.append(body)
-        signatures.append(f"{language}#{index}")
-    joined = "".join(payload)
-    if hashlib.sha256(joined.encode()).hexdigest() != assignment.get("static_body_sha256"):
-        raise WoonError("static_parts joined payload differs from static_body_sha256")
-    return joined, tuple(signatures)
-
-
-def validate_static_parts_source_evidence(
-    vault: Path, element: dict[str, Any], assignment: dict[str, Any], payload: str
-) -> None:
-    """Bind displayed parts to one hash-pinned, reviewed extraction record.
-
-    This reads existing source-blocks evidence; it never re-extracts the book
-    or treats print callouts in an older reader as executable source bytes.
-    """
-    proof = assignment.get("source_payload_evidence")
-    if isinstance(proof, dict) and set(proof) == {"source_mapping_evidence"}:
-        static_parts_source_mapping(
-            vault, proof["source_mapping_evidence"], element, assignment["owner_id"], payload
-        )
-        return
-    if not isinstance(proof, dict) or set(proof) != {
-        "relative_path",
-        "sha256",
-        "block_id",
-        "canonical_locator",
-        "extracted_locator",
-    }:
-        raise WoonError("static_parts source_payload_evidence fields are invalid")
-    relative, digest, block_id = proof["relative_path"], proof["sha256"], proof["block_id"]
-    if (
-        not isinstance(relative, str)
-        or not relative.startswith("private/")
-        or "\\" in relative
-        or Path(relative).as_posix() != relative
-        or ".." in Path(relative).parts
-        or not isinstance(digest, str)
-        or _LOWER_SHA256.fullmatch(digest) is None
-        or not isinstance(block_id, str)
-        or not block_id
-    ):
-        raise WoonError(
-            "static_parts source evidence requires a private Vault path, hash and block ID"
-        )
-    parts = Path(relative).parts
-    if any((vault / Path(*parts[:i])).is_symlink() for i in range(1, len(parts) + 1)):
-        raise WoonError("static_parts source evidence must not traverse symlinks")
-    try:
-        raw = (vault / relative).read_bytes()
-        if hashlib.sha256(raw).hexdigest() != digest:
-            raise WoonError("static_parts source evidence file hash differs")
-        records = json.loads(raw)
-    except (OSError, ValueError) as error:
-        raise WoonError("static_parts source evidence file is unreadable") from error
-    if not isinstance(records, list):
-        raise WoonError("static_parts source evidence must contain source-block records")
-    matches = [row for row in records if isinstance(row, dict) and row.get("id") == block_id]
-    if len(matches) != 1:
-        raise WoonError("static_parts source evidence block ID must occur exactly once")
-    record = matches[0]
-    markdown = record.get("english_md")
-    canonical, extracted = proof["canonical_locator"], proof["extracted_locator"]
-    same_source = canonical == extracted
-    if isinstance(canonical, str) and isinstance(extracted, str) and not same_source:
-        old_address = re.fullmatch(r"(.+):(block|dom-child)-[0-9]+", canonical)
-        new_address = re.fullmatch(r"(.+):(block|dom-child)-[0-9]+", extracted)
-        same_source = bool(
-            old_address
-            and new_address
-            and old_address[1] == new_address[1]
-            and old_address[2] != new_address[2]
-        )
-    if (
-        not isinstance(canonical, str)
-        or not canonical
-        or not same_source
-        or canonical != element.get("source_locator")
-        or extracted != record.get("source_locator")
-        or record.get("kind") != "code"
-        or record.get("source_html_sha256") != element.get("source_sha256")
-        or not isinstance(markdown, str)
-        or hashlib.sha256(markdown.encode()).hexdigest() != record.get("english_md_sha256")
-    ):
-        raise WoonError("static_parts source record identity or Markdown hash differs")
-    source_parts: list[str] = []
-    cursor = 0
-    for fence in _FENCE_BLOCK.finditer(markdown):
-        if markdown[cursor : fence.start()].strip():
-            raise WoonError("static_parts source code record contains uncovered prose")
-        source_parts.append(fence["body"])
-        cursor = fence.end()
-    if not source_parts or markdown[cursor:].strip() or "".join(source_parts) != payload:
-        raise WoonError("static_parts payload differs from the pinned source extraction")

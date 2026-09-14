@@ -1,7 +1,9 @@
 from pathlib import Path
+from unicodedata import normalize
 
 import pytest
 
+from woon_core.knowledge.context_bundle import build_wiki_context_bundle
 from woon_core.knowledge.wiki_tree import (
     BOOK_READER_NAVIGATION_END,
     BOOK_READER_NAVIGATION_START,
@@ -13,6 +15,7 @@ from woon_core.knowledge.wiki_tree import (
     apply_wiki_tree_refresh,
     is_wiki_source_archive,
     load_wiki_tree,
+    normalize_identity,
     prepare_wiki_tree_refresh,
     preserve_generated_wiki_views,
     render_book_toc_group,
@@ -20,6 +23,129 @@ from woon_core.knowledge.wiki_tree import (
     split_markdown,
     strip_generated_wiki_views,
 )
+from woon_core.knowledge.woon_wiki import preserve_managed_context
+
+
+def test_language_symbols_remain_distinct_in_identity_matching() -> None:
+    assert len({normalize_identity(name) for name in ("C", "C++", "C#")}) == 3
+    assert normalize_identity("Type Script") == normalize_identity("type-script")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "group",
+        "section",
+        "linked-section",
+        "valid-anchor",
+        "leaf",
+        "sidebar",
+        "missing",
+        "outside",
+        "prose",
+        "public",
+        "parent",
+        "anchor",
+        "symlink",
+    ],
+)
+def test_private_reader_pointer_preserves_book_structure_rules(tmp_path: Path, case: str) -> None:
+    for relative, title, canonical_id, kind, parent in (
+        ("wiki/README.md", "Wiki", "README", "root", None),
+        ("wiki/books/README.md", "책", "books/README", "hub", "[[wiki/README]]"),
+        (
+            "wiki/books/database.md",
+            "데이터베이스",
+            "books/database",
+            "hub",
+            "[[wiki/books/README]]",
+        ),
+    ):
+        _write_page(
+            tmp_path,
+            relative,
+            title=title,
+            canonical_id=canonical_id,
+            node_kind=kind,
+            parent=parent,
+            keywords=(title,),
+        )
+    target = tmp_path / "private/reader.md"
+    target.parent.mkdir()
+    if case != "missing":
+        target.write_text("# 독립 목차\n")
+    body = "[원문 목차](../../private/reader.md)"
+    if case == "anchor":
+        body = "[원문 목차](../../private/reader.md#없는-절)"
+    if case == "valid-anchor":
+        body = "[독립 목차](<../../private/reader.md#독립 목차>)"
+    if case == "symlink":
+        alias = target.with_name("linked.md")
+        alias.symlink_to(target)
+        body = "[원문 목차](../../private/linked.md)"
+    if case == "outside":
+        body = "[외부 대상](../README.md)"
+    if case != "leaf":
+        body = "## 목차\n\n- " + body
+    if case == "section":
+        body = body.replace("\n\n- ", "\n\n### 1.2 설치\n\n- ")
+    if case == "linked-section":
+        body = body.replace("\n\n- ", "\n\n### ")
+    if case == "prose":
+        body += "\n\n원전 내용을 승격한 본문이다."
+    extra = "entity_kind: book\naccess: local-only\npublish: false\n"
+    if case == "public":
+        extra = "entity_kind: book\naccess: public\npublish: true\n"
+    if case != "leaf":
+        extra += "navigation_groups:\n- label: 목차\n  children: [books/example/chapter-01]\n"
+    if case == "sidebar":
+        extra += "reader_navigation: sidebar-only\n"
+        _write_page(
+            tmp_path,
+            "wiki/related.md",
+            title="관련 개념",
+            canonical_id="related",
+            node_kind="topic",
+            parent="[[wiki/README]]",
+            keywords=("관련 개념",),
+            extra="related_to:\n- '[[wiki/books/example]]'\n",
+        )
+    _write_page(
+        tmp_path,
+        "wiki/books/example.md",
+        title="예시 책",
+        canonical_id="books/example",
+        node_kind="entity",
+        parent="[[wiki/missing]]" if case == "parent" else "[[wiki/books/database]]",
+        keywords=("예시 책",),
+        view_mode="linear",
+        body=body,
+        extra=extra,
+    )
+    if case != "leaf":
+        _write_page(
+            tmp_path,
+            "wiki/books/example/chapter-01.md",
+            title="1장",
+            canonical_id="books/example/chapter-01",
+            node_kind="topic",
+            parent="[[wiki/books/example]]",
+            keywords=("1장",),
+            view_mode="linear",
+        )
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.md")}
+    report = prepare_wiki_tree_refresh(tmp_path)
+    if case in {"group", "section", "linked-section", "valid-anchor", "leaf", "sidebar"}:
+        assert report.issues == ()
+        assert body in report.pages[tmp_path / "wiki/books/example.md"].decode()
+        assert "## 최신 관련 문서" not in report.pages[tmp_path / "wiki/books/example.md"].decode()
+    elif case in {"missing", "outside", "anchor", "symlink"}:
+        assert any("TOC reader link" in issue for issue in report.issues)
+    elif case == "parent":
+        assert any("parent is missing" in issue for issue in report.issues)
+    else:
+        assert any("authored body must be empty" in issue for issue in report.issues)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*.md")} == before
 
 
 def test_refresh_preserves_existing_children_before_source_index(tmp_path: Path) -> None:
@@ -56,8 +182,10 @@ def test_refresh_preserves_existing_children_before_source_index(tmp_path: Path)
 
     assert report.issues == ()
     rendered = report.pages[tmp_path / "wiki/README.md"].decode("utf-8")
-    assert rendered == (tmp_path / "wiki/README.md").read_text(encoding="utf-8")
-    assert rendered.index("## 하위 키워드") < rendered.index("## 원자료")
+    assert "## 하위 키워드" not in rendered
+    assert rendered.index(CHILDREN_START) < rendered.index("## 원자료")
+    assert "- [[wiki/child|하위]]" in rendered
+    assert SOURCE_INDEX_START in rendered
 
 
 def test_linear_map_hides_internal_sequence_numbers_from_reader_navigation(
@@ -116,7 +244,8 @@ def test_linear_map_hides_internal_sequence_numbers_from_reader_navigation(
     assert "[[wiki/learning/next-token|다음 값은 왜 한 칸 뒤에 놓이는가]]" in rendered
     assert "3. [[" not in rendered
     assert "4. [[" not in rendered
-    assert "\n\n## " in rendered
+    assert "- 학습 흐름\n" in rendered
+    assert "## 하위 키워드" not in rendered
 
 
 def test_source_archive_detection_uses_the_vault_relative_boundary(tmp_path: Path) -> None:
@@ -130,7 +259,7 @@ def test_source_archive_detection_uses_the_vault_relative_boundary(tmp_path: Pat
     assert not is_wiki_source_archive(outside, wiki_root)
 
 
-def test_preserved_view_reuses_an_empty_managed_heading() -> None:
+def test_preserved_view_removes_the_empty_generic_heading() -> None:
     rendered = "---\ntype: Wiki\n---\n\n# 프로젝트\n\n## 하위 키워드\n"
     existing = (
         "---\ntype: Wiki\n---\n\n# 프로젝트\n\n## 하위 키워드\n\n"
@@ -139,7 +268,7 @@ def test_preserved_view_reuses_an_empty_managed_heading() -> None:
 
     preserved = preserve_generated_wiki_views(existing, rendered)
 
-    assert preserved.count("## 하위 키워드") == 1
+    assert "## 하위 키워드" not in preserved
     assert preserved.count(CHILDREN_START) == 1
 
 
@@ -565,7 +694,7 @@ def test_project_entity_renders_only_information_and_blog_maps(tmp_path: Path) -
     rendered = report.pages[tmp_path / "wiki/projects/k8s-clue.md"].decode("utf-8")
     assert "- 프로젝트 정보" in rendered
     assert "- 블로그" in rendered
-    assert "## 하위 키워드" in rendered
+    assert "## 하위 키워드" not in rendered
     assert "## 최신 하위 문서" not in rendered
     assert "## 최신 관련 문서" not in rendered
 
@@ -589,6 +718,69 @@ def test_public_wiki_rejects_an_unapproved_hub_level(tmp_path: Path) -> None:
         "'임의 분류' is not in the "
         "fixed taxonomy below '공개 Wiki 경계'",
     )
+
+
+@pytest.mark.parametrize("title", ["프로젝트", "Projects"])
+@pytest.mark.parametrize("case", ["valid", "wrong-kind", "wrong-children"])
+def test_declared_project_contract_survives_a_hub_title_change(
+    tmp_path: Path, title: str, case: str
+) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Vault",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Vault",),
+    )
+    expected_project = "Different project" if case == "wrong-children" else "Example"
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/README.md",
+        title="공개 Wiki 경계",
+        canonical_id="wiki",
+        node_kind="hub",
+        parent="[[wiki/README|Vault]]",
+        keywords=("공개 Wiki 경계",),
+        extra=(
+            "reader_navigation: sidebar-only\npublic_taxonomy:\n  version: 1\n"
+            f"  roots: [{title}]\n  projects: [{expected_project}]\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/projects.md",
+        title=title,
+        canonical_id="Wiki/projects",
+        node_kind="hub",
+        parent="[[wiki/Wiki/README|공개 Wiki 경계]]",
+        keywords=(title,),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/example.md",
+        title="Example",
+        canonical_id="Wiki/example",
+        node_kind="topic" if case == "wrong-kind" else "entity",
+        parent=f"[[wiki/Wiki/projects|{title}]]",
+        keywords=("Example",),
+        body="검증한 프로젝트의 목적과 현재 구현 상태를 기록한다.",
+        extra="" if case == "wrong-kind" else "entity_kind: project\nlifecycle_status: active\n",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    if case == "valid":
+        assert report.issues == ()
+    else:
+        assert report.pages == {}
+        expected = (
+            "public Wiki projects must contain project entities"
+            if case == "wrong-kind"
+            else "public Wiki project children do not match the declared contract"
+        )
+        assert report.issues == (expected,)
 
 
 def test_public_wiki_rejects_an_unapproved_topic_at_a_structural_level(tmp_path: Path) -> None:
@@ -679,6 +871,9 @@ def test_book_front_matter_titles_may_repeat_across_book_entities(tmp_path: Path
         node_kind="hub",
         parent="[[wiki/books/README|책]]",
         keywords=("소프트웨어",),
+        extra=(
+            "navigation_groups:\n- label: 도서\n  children: [personal/book-1, personal/book-2]\n"
+        ),
     )
     for index in (1, 2):
         book_path = f"wiki/personal/book-{index}.md"
@@ -692,8 +887,13 @@ def test_book_front_matter_titles_may_repeat_across_book_entities(tmp_path: Path
             parent="[[wiki/books/software|소프트웨어]]",
             keywords=(f"검증 책 {index}",),
             view_mode="linear",
-            body=f"- [[{child_path.removesuffix('.md')}|맺음말]]",
-            extra="entity_kind: book\n",
+            body="",
+            extra=(
+                "entity_kind: book\nedition: Second Edition\nlearning_status: not-started\n"
+                + ("reader_completion: incomplete\n" if index == 1 else "")
+                + "navigation_groups:\n- label: 맺음말\n"
+                + f"  children: [personal/book-{index}/afterword]\n"
+            ),
         )
         _write_page(
             tmp_path,
@@ -709,6 +909,26 @@ def test_book_front_matter_titles_may_repeat_across_book_entities(tmp_path: Path
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert not any("duplicate identity '맺음말'" in issue for issue in report.issues)
+    assert report.issues == ()
+    book_list = report.pages[tmp_path / "wiki/books/software.md"].decode()
+    assert "[[wiki/personal/book-1|검증 책 1]] (정리 미완료)" in book_list
+    assert "[[wiki/personal/book-2|검증 책 2]] (정리 미완료)" not in book_list
+    first_book = tmp_path / "wiki/personal/book-1.md"
+    before_metadata, _ = split_markdown(first_book.read_text())
+    after_metadata, _ = split_markdown(report.pages[first_book].decode())
+    assert after_metadata == before_metadata
+    first_book.write_text(
+        first_book.read_text().replace(
+            "reader_completion: incomplete", "reader_completion: complete"
+        )
+    )
+    completed = prepare_wiki_tree_refresh(tmp_path)
+    assert completed.issues == ()
+    assert "(정리 미완료)" not in completed.pages[tmp_path / "wiki/books/software.md"].decode()
+    first_book.write_text(
+        first_book.read_text().replace("reader_completion: complete", "reader_completion: true")
+    )
+    assert any("reader_completion" in issue for issue in prepare_wiki_tree_refresh(tmp_path).issues)
 
 
 def test_entity_does_not_repeat_an_authored_link_in_latest_related_documents(
@@ -781,7 +1001,7 @@ def test_entity_does_not_repeat_an_authored_link_in_latest_related_documents(
     assert rerun.changed_count == 0
 
 
-def test_person_entity_uses_incoming_people_links_for_latest_index(tmp_path: Path) -> None:
+def test_person_entity_does_not_rebuild_redundant_latest_index(tmp_path: Path) -> None:
     _write_page(
         tmp_path,
         "wiki/README.md",
@@ -829,10 +1049,9 @@ def test_person_entity_uses_incoming_people_links_for_latest_index(tmp_path: Pat
     rendered = report.pages[tmp_path / "wiki/person.md"].decode("utf-8")
 
     assert report.issues == ()
-    assert "## 최신 관련 문서" in rendered
-    assert "[[wiki/decision|구조 결정]]" in rendered
-    latest = rendered.split("<!-- woon-wiki-latest:start -->", maxsplit=1)[1]
-    assert "[[wiki/people|인물]]" not in latest
+    assert "## 최신 관련 문서" not in rendered
+    assert "<!-- woon-wiki-latest:start -->" not in rendered
+    assert "현재 확인된 역할과 연결 문서" in rendered
 
 
 def test_entity_latest_index_does_not_repeat_direct_children(tmp_path: Path) -> None:
@@ -883,8 +1102,10 @@ def test_entity_latest_index_does_not_repeat_direct_children(tmp_path: Path) -> 
     assert "## 최신 관련 문서" not in rendered
 
 
+@pytest.mark.parametrize("inline_hub", [False, True])
 def test_entity_does_not_repeat_direct_children_already_in_keyword_section(
     tmp_path: Path,
+    inline_hub: bool,
 ) -> None:
     _write_page(
         tmp_path,
@@ -900,12 +1121,16 @@ def test_entity_does_not_repeat_direct_children_already_in_keyword_section(
         "wiki/person.md",
         title="인물",
         canonical_id="person",
-        node_kind="entity",
+        node_kind="hub" if inline_hub else "entity",
         parent="[[wiki/README|Wiki]]",
         keywords=("인물",),
-        view_mode="topic-timeline",
+        view_mode="tree" if inline_hub else "topic-timeline",
         body="## 키워드\n\n- [[wiki/person/project|함께한 프로젝트]]",
-        extra="entity_kind: person\nlifecycle_status: active\n",
+        extra=(
+            "reader_navigation: inline\n"
+            if inline_hub
+            else "entity_kind: person\nlifecycle_status: active\n"
+        ),
     )
     _write_page(
         tmp_path,
@@ -1964,7 +2189,7 @@ def test_book_map_with_children_requires_source_owned_navigation_groups(
     )
 
 
-def test_temporal_children_render_open_range_closed_range_and_single_day(tmp_path: Path) -> None:
+def test_temporal_children_render_date_first_without_duplicate_result_day(tmp_path: Path) -> None:
     _write_page(
         tmp_path,
         "wiki/README.md",
@@ -1991,6 +2216,9 @@ def test_temporal_children_render_open_range_closed_range_and_single_day(tmp_pat
             "  children:\n"
             "  - career/completed\n"
             "  - career/one-day\n"
+            "  - career/unknown-end\n"
+            "  - career/result\n"
+            "  - career/provisional\n"
         ),
     )
     for relative, title, canonical_id, temporal in (
@@ -2012,28 +2240,62 @@ def test_temporal_children_render_open_range_closed_range_and_single_day(tmp_pat
             "career/one-day",
             "lifecycle_status: completed\noccurred_on: 2026-08-25\n",
         ),
+        (
+            "wiki/unknown-end.md",
+            "종료된 준비",
+            "career/unknown-end",
+            "lifecycle_status: archived\nstarted_on: 2026-08-01\n",
+        ),
+        (
+            "wiki/result.md",
+            "2026-08-27 - Example - AI Engineer",
+            "career/result",
+            "entity_kind: career-application\nlifecycle_status: completed\n"
+            "started_on: 2026-08-02\nended_on: 2026-08-27\n",
+        ),
+        (
+            "wiki/provisional.md",
+            "임시 배치 기록",
+            "career/provisional",
+            "event_period: 2026-09-02 · 임시 배치, 확인 필요\n",
+        ),
     ):
         _write_page(
             tmp_path,
             relative,
             title=title,
             canonical_id=canonical_id,
-            node_kind="topic",
+            node_kind="entity" if canonical_id == "career/result" else "topic",
             parent="[[wiki/career|커리어]]",
             keywords=(title,),
             extra=temporal,
+            body="근거가 보존된 원래 기록이다.",
         )
 
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert report.issues == ()
     rendered = report.pages[tmp_path / "wiki/career.md"].decode("utf-8")
-    assert "[[wiki/active|진행 중 준비]] · 2026-08-01 →" in rendered
-    assert "[[wiki/completed|종료된 지원]] · 2026-07-01 → 2026-07-20" in rendered
-    assert "[[wiki/one-day|하루 면접]] · 2026-08-25" in rendered
+    assert "2026-08-01 · [[wiki/active|진행 중 준비]]" in rendered
+    assert "2026-07-01 → 2026-07-20 · [[wiki/completed|종료된 지원]]" in rendered
+    assert "2026-08-25 · [[wiki/one-day|하루 면접]]" in rendered
+    assert "2026-08-01 시작 · 종료됨(종료일 미상) · [[wiki/unknown-end|종료된 준비]]" in rendered
+    result_row = next(row for row in rendered.splitlines() if "[[wiki/result|" in row)
+    assert result_row.count("2026-08-27") == 1
+    assert "2026-08-02" not in result_row
+    assert "2026-09-02 · 임시 배치, 확인 필요 · [[wiki/provisional|임시 배치 기록]]" in rendered
+    for path, content in report.pages.items():
+        original_metadata, original_body = split_markdown(
+            strip_generated_wiki_views(path.read_text())
+        )
+        metadata, body = split_markdown(strip_generated_wiki_views(content.decode()))
+        assert metadata == original_metadata
+        assert body == original_body
+    apply_wiki_tree_refresh(tmp_path, report)
+    assert prepare_wiki_tree_refresh(tmp_path).changed_count == 0
 
 
-def test_temporal_contract_rejects_incomplete_or_inverted_lifecycle(tmp_path: Path) -> None:
+def test_temporal_contract_accepts_unknown_end_but_rejects_inverted_dates(tmp_path: Path) -> None:
     _write_page(
         tmp_path,
         "wiki/README.md",
@@ -2066,10 +2328,24 @@ def test_temporal_contract_rejects_incomplete_or_inverted_lifecycle(tmp_path: Pa
 
     report = prepare_wiki_tree_refresh(tmp_path)
 
-    assert "wiki/missing-end.md: closed lifecycle requires ended_on or occurred_on" in (
-        report.issues
-    )
+    assert not any("wiki/missing-end.md:" in issue for issue in report.issues)
     assert "wiki/inverted.md: ended_on cannot precede started_on" in report.issues
+    _write_page(
+        tmp_path,
+        "wiki/open-end.md",
+        title="진행 중",
+        canonical_id="open-end",
+        node_kind="topic",
+        parent="[[wiki/README]]",
+        keywords=("진행 중",),
+        extra=(
+            "lifecycle_status: active\nstarted_on: 2026-08-24\n"
+            "ended_on: 2026-08-25\noccurred_on: 2026-08-24\n"
+        ),
+    )
+    issues = prepare_wiki_tree_refresh(tmp_path).issues
+    assert "wiki/open-end.md: open lifecycle cannot have ended_on" in issues
+    assert "wiki/open-end.md: occurred_on cannot be combined with a date range" in issues
 
 
 def test_temporal_entities_require_lifecycle_status(tmp_path: Path) -> None:
@@ -2407,7 +2683,8 @@ def test_flat_navigation_rejects_missing_or_duplicate_sibling_order(tmp_path: Pa
     assert any("ordered navigation requires sequence" in issue for issue in report.issues)
 
 
-def test_dense_hub_requires_explicit_stage_groups(tmp_path: Path) -> None:
+@pytest.mark.parametrize("navigation_order", ["", "navigation_order: title\n"])
+def test_dense_hub_requires_explicit_stage_groups(tmp_path: Path, navigation_order: str) -> None:
     _write_page(
         tmp_path,
         "wiki/README.md",
@@ -2425,6 +2702,7 @@ def test_dense_hub_requires_explicit_stage_groups(tmp_path: Path) -> None:
         node_kind="hub",
         parent="[[wiki/README|Wiki]]",
         keywords=("LLM",),
+        extra=navigation_order,
     )
     for index in range(11):
         _write_page(
@@ -2442,9 +2720,12 @@ def test_dense_hub_requires_explicit_stage_groups(tmp_path: Path) -> None:
     assert any(
         "11 direct children require explicit navigation groups" in issue for issue in report.issues
     )
+    if navigation_order:
+        assert any("allowed only on the root-direct people hub" in issue for issue in report.issues)
 
 
-def test_project_entity_can_render_explicit_reading_stages(tmp_path: Path) -> None:
+@pytest.mark.parametrize("inline", [False, True])
+def test_project_entity_can_render_explicit_reading_stages(tmp_path: Path, inline: bool) -> None:
     _write_page(
         tmp_path,
         "wiki/README.md",
@@ -2464,7 +2745,7 @@ def test_project_entity_can_render_explicit_reading_stages(tmp_path: Path) -> No
         keywords=("프로젝트",),
         view_mode="project",
         extra=(
-            "entity_kind: project\n"
+            ("reader_navigation: inline\n" if inline else "") + "entity_kind: project\n"
             "lifecycle_status: active\n"
             "navigation_groups:\n"
             "- label: 이해 순서\n"
@@ -2496,8 +2777,12 @@ def test_project_entity_can_render_explicit_reading_stages(tmp_path: Path) -> No
     rendered = report.pages[tmp_path / "wiki/project.md"].decode("utf-8")
 
     assert report.issues == ()
-    assert "- 이해 순서\n  - [[wiki/problem|문제]]" in rendered
-    assert "  - [[wiki/architecture|아키텍처]]" in rendered
+    if inline:
+        assert "## 이해 순서\n- [[wiki/problem|문제]]" in rendered
+        assert "\n- [[wiki/architecture|아키텍처]]" in rendered
+    else:
+        assert "- 이해 순서\n  - [[wiki/problem|문제]]" in rendered
+        assert "  - [[wiki/architecture|아키텍처]]" in rendered
 
 
 def test_resource_groups_inline_raw_links_below_topic_text(tmp_path: Path) -> None:
@@ -3291,7 +3576,8 @@ def test_chapter_body_rejects_manual_duplicates_of_managed_lesson_links(tmp_path
     )
 
 
-def test_people_hub_rejects_topic_as_direct_person(tmp_path: Path) -> None:
+@pytest.mark.parametrize("navigation_order", ["", "navigation_order: title\n"])
+def test_people_hub_rejects_topic_as_direct_person(tmp_path: Path, navigation_order: str) -> None:
     _write_page(
         tmp_path,
         "wiki/README.md",
@@ -3309,15 +3595,16 @@ def test_people_hub_rejects_topic_as_direct_person(tmp_path: Path) -> None:
         node_kind="hub",
         parent="[[wiki/README|Wiki]]",
         keywords=("인물",),
+        extra=navigation_order,
     )
     _write_page(
         tmp_path,
         "wiki/people/analysis.md",
-        title="이민정 AI 분석",
+        title="이서연 AI 분석",
         canonical_id="people/analysis",
         node_kind="topic",
         parent="[[wiki/people/README|인물]]",
-        keywords=("이민정 AI 분석",),
+        keywords=("이서연 AI 분석",),
     )
 
     report = prepare_wiki_tree_refresh(tmp_path)
@@ -3326,6 +3613,94 @@ def test_people_hub_rejects_topic_as_direct_person(tmp_path: Path) -> None:
     assert report.issues == (
         "wiki/people/analysis.md: direct children of people must be person entities",
     )
+
+
+@pytest.mark.parametrize("groups", [False, True])
+@pytest.mark.parametrize(
+    ("hub_title", "hub_id"), [("인물", "people"), ("인물 관계", "people/README")]
+)
+def test_people_initial_index_agrees_with_context_and_rejects_groups(
+    tmp_path: Path, groups: bool, hub_title: str, hub_id: str
+) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/people.md",
+        title=hub_title,
+        canonical_id=hub_id,
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("인물",),
+        extra="navigation_order: title\n"
+        + (
+            "navigation_groups:\n- label: 사람\n"
+            "  children: [person-a, person-b, person-z, person-y]\n"
+            if groups
+            else ""
+        ),
+    )
+    # Slugs, creation order, keywords and sequence cannot substitute for a name.
+    names = (("a", normalize("NFD", "이서연")), ("b", "정하린"), ("z", "김다은"), ("y", "강가람"))
+    for index, (slug, name) in enumerate(names, start=3):
+        _write_page(
+            tmp_path,
+            f"wiki/person-{slug}.md",
+            title=name,
+            canonical_id=f"person-{slug}",
+            node_kind="entity",
+            parent=f"[[wiki/people|{hub_title}]]",
+            keywords=(f"인물 검색어 {slug}",),
+            body="확인된 인물 맥락과 자료를 기록한다.",
+            extra="entity_kind: person\nlifecycle_status: active\n",
+        )
+        path = tmp_path / f"wiki/person-{slug}.md"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                f"sequence: {index}\n", "" if slug == "z" else "sequence: 1\n"
+            ),
+            encoding="utf-8",
+        )
+
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*.md")}
+    report = prepare_wiki_tree_refresh(tmp_path)
+    assert all(path.read_bytes() == content for path, content in before.items())
+    if groups:
+        assert report.pages == {}
+        assert report.issues == (
+            "wiki/people.md: navigation_order title cannot be combined with navigation_groups",
+        )
+        return
+
+    assert report.issues == ()
+    rendered = report.pages[tmp_path / "wiki/people.md"].decode("utf-8")
+    expected = ("강가람", "김다은", normalize("NFD", "이서연"), "정하린")
+    body = split_markdown(rendered)[1]
+    rows = [row for row in body.splitlines() if row.startswith(("- ", "  - "))]
+    assert rows == [
+        "- ㄱ",
+        "  - [[wiki/person-y|강가람]]",
+        "  - [[wiki/person-z|김다은]]",
+        "- ㅇ",
+        f"  - [[wiki/person-a|{expected[2]}]]",
+        "- ㅈ",
+        "  - [[wiki/person-b|정하린]]",
+    ]
+    assert not any(line.startswith("## ") for line in rendered.splitlines())
+    assert split_markdown(rendered)[0]["title"] == hub_title
+    assert f"# {hub_title}\n" in rendered
+    bundle = build_wiki_context_bundle(tmp_path, hub_id)
+    assert tuple(item.title for item in bundle.items if item.role == "child") == expected
+    assert not any(item.role == "navigation-group" for item in bundle.items)
+    merged = preserve_managed_context(rendered, "---\ntype: Wiki\ntitle: 인물\n---\n\n# 인물\n")
+    assert split_markdown(merged)[0]["navigation_order"] == "title"
 
 
 def test_raw_source_archive_is_not_a_second_wiki_tree(tmp_path: Path) -> None:
@@ -3561,120 +3936,3 @@ def test_planned_parent_link_uses_existing_parent_and_keeps_authored_text(tmp_pa
     assert PARENT_START not in render(rendered, current_texts=private_parent)
     private_child = original.replace("access: public", "access: local-only")
     assert PARENT_START not in render(private_child)
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        "group",
-        "section",
-        "linked-section",
-        "valid-anchor",
-        "leaf",
-        "sidebar",
-        "missing",
-        "outside",
-        "prose",
-        "public",
-        "parent",
-        "anchor",
-        "symlink",
-    ],
-)
-def test_private_reader_pointer_preserves_book_structure_rules(tmp_path: Path, case: str) -> None:
-    for relative, title, canonical_id, kind, parent in (
-        ("wiki/README.md", "Wiki", "README", "root", None),
-        ("wiki/books/README.md", "책", "books/README", "hub", "[[wiki/README]]"),
-        (
-            "wiki/books/database.md",
-            "데이터베이스",
-            "books/database",
-            "hub",
-            "[[wiki/books/README]]",
-        ),
-    ):
-        _write_page(
-            tmp_path,
-            relative,
-            title=title,
-            canonical_id=canonical_id,
-            node_kind=kind,
-            parent=parent,
-            keywords=(title,),
-        )
-    target = tmp_path / "private/reader.md"
-    target.parent.mkdir()
-    if case != "missing":
-        target.write_text("# 독립 목차\n")
-    body = "[원문 목차](../../private/reader.md)"
-    if case == "anchor":
-        body = "[원문 목차](../../private/reader.md#없는-절)"
-    if case == "valid-anchor":
-        body = "[독립 목차](<../../private/reader.md#독립 목차>)"
-    if case == "symlink":
-        alias = target.with_name("linked.md")
-        alias.symlink_to(target)
-        body = "[원문 목차](../../private/linked.md)"
-    if case == "outside":
-        body = "[외부 대상](../README.md)"
-    if case != "leaf":
-        body = "## 목차\n\n- " + body
-    if case == "section":
-        body = body.replace("\n\n- ", "\n\n### 1.2 설치\n\n- ")
-    if case == "linked-section":
-        body = body.replace("\n\n- ", "\n\n### ")
-    if case == "prose":
-        body += "\n\n원전 내용을 승격한 본문이다."
-    extra = "entity_kind: book\naccess: local-only\npublish: false\n"
-    if case == "public":
-        extra = "entity_kind: book\naccess: public\npublish: true\n"
-    if case != "leaf":
-        extra += "navigation_groups:\n- label: 목차\n  children: [books/example/chapter-01]\n"
-    if case == "sidebar":
-        extra += "reader_navigation: sidebar-only\n"
-        _write_page(
-            tmp_path,
-            "wiki/related.md",
-            title="관련 개념",
-            canonical_id="related",
-            node_kind="topic",
-            parent="[[wiki/README]]",
-            keywords=("관련 개념",),
-            extra="related_to:\n- '[[wiki/books/example]]'\n",
-        )
-    _write_page(
-        tmp_path,
-        "wiki/books/example.md",
-        title="예시 책",
-        canonical_id="books/example",
-        node_kind="entity",
-        parent="[[wiki/missing]]" if case == "parent" else "[[wiki/books/database]]",
-        keywords=("예시 책",),
-        view_mode="linear",
-        body=body,
-        extra=extra,
-    )
-    if case != "leaf":
-        _write_page(
-            tmp_path,
-            "wiki/books/example/chapter-01.md",
-            title="1장",
-            canonical_id="books/example/chapter-01",
-            node_kind="topic",
-            parent="[[wiki/books/example]]",
-            keywords=("1장",),
-            view_mode="linear",
-        )
-    before = {p: p.read_bytes() for p in tmp_path.rglob("*.md")}
-    report = prepare_wiki_tree_refresh(tmp_path)
-    if case in {"group", "section", "linked-section", "valid-anchor", "leaf", "sidebar"}:
-        assert report.issues == ()
-        assert body in report.pages[tmp_path / "wiki/books/example.md"].decode()
-        assert "## 최신 관련 문서" not in report.pages[tmp_path / "wiki/books/example.md"].decode()
-    elif case in {"missing", "outside", "anchor", "symlink"}:
-        assert any("TOC reader link" in issue for issue in report.issues)
-    elif case == "parent":
-        assert any("parent is missing" in issue for issue in report.issues)
-    else:
-        assert any("authored body must be empty" in issue for issue in report.issues)
-    assert {p: p.read_bytes() for p in tmp_path.rglob("*.md")} == before

@@ -13,6 +13,7 @@ from woon_core.knowledge.wiki_tree import (
     WikiTreeNode,
     load_wiki_tree,
     normalize_identity,
+    sort_wiki_children,
     split_markdown,
     strip_generated_wiki_views,
 )
@@ -222,16 +223,7 @@ def _ordered_wiki_children(
             for child_id in group.child_ids
             if child_id in by_id
         )
-    return tuple(
-        sorted(
-            direct,
-            key=lambda node: (
-                node.sequence is None,
-                node.sequence if node.sequence is not None else 0,
-                node.title.casefold(),
-            ),
-        )
-    )
+    return sort_wiki_children(parent, direct)
 
 
 def _navigation_group_item(

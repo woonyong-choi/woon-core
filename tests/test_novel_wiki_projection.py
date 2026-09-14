@@ -2,11 +2,15 @@ import json
 from datetime import date
 from pathlib import Path
 
+import pytest
+
+from woon_core.errors import WoonError
 from woon_core.knowledge.novel_wiki_projection import (
     _render_page,
     apply_novel_wiki_projection,
     prepare_novel_wiki_projection,
 )
+from woon_core.knowledge.wiki_tree import render_markdown, split_markdown
 
 
 def _page(
@@ -60,6 +64,16 @@ def test_render_preserves_existing_human_reviewed_navigation_groups(tmp_path: Pa
             "  children:\n"
             "  - private/novel/existing/first\n"
         ),
+        body=(
+            "## 원자료\n\n"
+            "<!-- woon-wiki-source-index:start -->\n"
+            "- [원자료](../../_sources/novel/source.md)\n"
+            "<!-- woon-wiki-source-index:end -->\n\n"
+            "## 하위 키워드\n\n"
+            "<!-- woon-wiki-children:start -->\n"
+            "- 기존 링크\n"
+            "<!-- woon-wiki-children:end -->\n"
+        ),
     )
 
     rendered = _render_page(
@@ -70,12 +84,122 @@ def test_render_preserves_existing_human_reviewed_navigation_groups(tmp_path: Pa
             "canonical_id": "private/novel/existing",
             "node_kind": "hub",
         },
-        "# 갱신된 허브\n",
+        (
+            "# 갱신된 허브\n\n"
+            "## 원자료\n\n"
+            "<!-- woon-wiki-source-index:start -->\n"
+            "- [원자료](../../_sources/novel/source.md)\n"
+            "<!-- woon-wiki-source-index:end -->\n"
+        ),
     ).decode("utf-8")
 
     assert "navigation_groups:" in rendered
     assert "label: 선형 탐색" in rendered
     assert "private/novel/existing/first" in rendered
+    assert rendered.index("## 원자료") < rendered.index("<!-- woon-wiki-children:start -->")
+
+
+def test_render_reconciles_source_bounded_event_child_and_replays(tmp_path: Path) -> None:
+    path = tmp_path / "wiki/private/novel/사건-히스토리/README.md"
+    existing_children = "".join(
+        f"  - private/novel/events/{number:02d}\n" for number in range(13, 26)
+    )
+    _page(
+        path,
+        title="소설 · 사건·히스토리",
+        canonical_id="private/novel/사건-히스토리",
+        node_kind="hub",
+        parent="[[wiki/personal/projects/novel|소설 집필]]",
+        navigation_groups=(
+            f"navigation_groups:\n- label: 사건 13–25\n  children:\n{existing_children}"
+        ),
+        body=(
+            "## 하위 키워드\n\n"
+            "<!-- woon-wiki-children:start -->\n"
+            "- 사건 13–25\n"
+            "<!-- woon-wiki-children:end -->\n"
+        ),
+    )
+    _page(
+        path.parent / "event-26.md",
+        title="소설 사건 26",
+        canonical_id="private/novel/events/26",
+        node_kind="detail",
+        parent="[[wiki/private/novel/사건-히스토리/README|소설 · 사건·히스토리]]",
+    )
+    metadata = {
+        "type": "Wiki",
+        "title": "소설 · 사건·히스토리",
+        "canonical_id": "private/novel/사건-히스토리",
+        "node_kind": "hub",
+    }
+
+    rendered = _render_page(
+        path,
+        metadata,
+        (
+            "# 소설 · 사건·히스토리\n\n"
+            "## 원자료\n\n"
+            "<!-- woon-wiki-source-index:start -->\n"
+            "- [사건 장부](../../_sources/novel/events.md)\n"
+            "<!-- woon-wiki-source-index:end -->\n"
+        ),
+        event_count=26,
+    )
+
+    text = rendered.decode("utf-8")
+    assert "label: 사건 13–26" in text
+    assert text.count("private/novel/events/26") == 1
+    assert text.index("<!-- woon-wiki-children:start -->") < text.index("## 원자료")
+    path.write_bytes(rendered)
+    replay = _render_page(
+        path,
+        metadata,
+        (
+            "# 소설 · 사건·히스토리\n\n"
+            "## 원자료\n\n"
+            "<!-- woon-wiki-source-index:start -->\n"
+            "- [사건 장부](../../_sources/novel/events.md)\n"
+            "<!-- woon-wiki-source-index:end -->\n"
+        ),
+        event_count=26,
+    )
+    assert replay == rendered
+
+
+def test_render_does_not_add_event_beyond_source_ledger_count(tmp_path: Path) -> None:
+    path = tmp_path / "wiki/private/novel/사건-히스토리/README.md"
+    _page(
+        path,
+        title="소설 · 사건·히스토리",
+        canonical_id="private/novel/사건-히스토리",
+        node_kind="hub",
+        parent="[[wiki/personal/projects/novel|소설 집필]]",
+        navigation_groups=(
+            "navigation_groups:\n- label: 사건 25\n  children:\n  - private/novel/events/25\n"
+        ),
+    )
+    _page(
+        path.parent / "event-26.md",
+        title="소설 사건 26",
+        canonical_id="private/novel/events/26",
+        node_kind="detail",
+        parent="[[wiki/private/novel/사건-히스토리/README|소설 · 사건·히스토리]]",
+    )
+
+    rendered = _render_page(
+        path,
+        {
+            "type": "Wiki",
+            "title": "소설 · 사건·히스토리",
+            "canonical_id": "private/novel/사건-히스토리",
+            "node_kind": "hub",
+        },
+        "# 소설 · 사건·히스토리\n",
+        event_count=25,
+    ).decode("utf-8")
+
+    assert "private/novel/events/26" not in rendered
 
 
 def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
@@ -101,7 +225,7 @@ def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
     _page(
         vault / "wiki/personal/projects/(미정)소설-집필.md",
         title="(미정)소설 집필",
-        canonical_id="private-novel",
+        canonical_id="personal/projects/private-novel-writing",
         node_kind="entity",
         parent="[[wiki/projects|프로젝트]]",
         entity_kind="project",
@@ -192,8 +316,69 @@ def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
 
     source.write_text("# 장면 원본\n\n변경됨\n", encoding="utf-8")
     changed = prepare_novel_wiki_projection(vault, novel, projection_day=date(2026, 8, 26))
-    assert changed.changed_count == 3
+    assert changed.changed_count == 1
     assert b'"projection_day": "2026-08-26"' in changed.manifest
+
+    old_project = vault / "wiki/personal/projects/(미정)소설-집필.md"
+    new_project = old_project.with_name("(미정)소설.md")
+    old_project.rename(new_project)
+    unchanged_pages = {path: path.read_bytes() for path in changed.pages}
+    unchanged_receipt = receipt.read_bytes()
+    with pytest.raises(WoonError, match="path changed after preparation"):
+        apply_novel_wiki_projection(vault, changed)
+    assert unchanged_pages == {path: path.read_bytes() for path in changed.pages}
+    assert receipt.read_bytes() == unchanged_receipt
+    new_project.rename(old_project)
+    apply_novel_wiki_projection(vault, changed)
+    old_project.rename(new_project)
+
+    project_metadata, project_body = split_markdown(new_project.read_text(encoding="utf-8"))
+    project_metadata["title"] = "(미정)소설"
+    project_metadata["aliases"] = ["(미정)소설 집필"]
+    new_project.write_text(
+        render_markdown(
+            project_metadata, project_body.replace("# (미정)소설 집필", "# (미정)소설")
+        ),
+        encoding="utf-8",
+    )
+    for hub in first.pages:
+        metadata, body = split_markdown(hub.read_text(encoding="utf-8"))
+        metadata["parent"] = "[[wiki/personal/projects/(미정)소설|(미정)소설]]"
+        hub.write_text(render_markdown(metadata, body), encoding="utf-8")
+    old_hub = vault / "wiki/private/novel/장면-원고/README.md"
+    new_hub = old_hub.with_name("원고.md")
+    old_hub.rename(new_hub)
+    metadata, body = split_markdown(new_hub.read_text(encoding="utf-8"))
+    metadata.update(title="원고", aliases=["장면과 원고"], keywords=["원고"], summary="확정한 설명")
+    new_hub.write_text(
+        render_markdown(metadata, body.replace("# 소설 · 장면·원고", "# 원고")), encoding="utf-8"
+    )
+    source_before = source.read_bytes()
+    renamed = prepare_novel_wiki_projection(vault, novel, projection_day=date(2026, 8, 27))
+    assert json.loads(renamed.manifest)["projection_day"] == "2026-08-26"
+    apply_novel_wiki_projection(vault, renamed)
+    replay = prepare_novel_wiki_projection(vault, novel, projection_day=date(2026, 8, 27))
+    assert replay.changed_count == 0
+    assert not old_project.exists()
+    assert not old_hub.exists()
+    metadata, body = split_markdown(new_hub.read_text(encoding="utf-8"))
+    assert metadata["title"] == "원고"
+    assert metadata["aliases"] == ["장면과 원고"]
+    assert metadata["keywords"] == ["원고"]
+    assert metadata["summary"] == "확정한 설명"
+    assert str(metadata["updated"]) == "2026-08-26"
+    assert body.startswith("# 원고\n")
+    assert "[[wiki/private/novel/장면-원고/원고|원고]]" in new_project.read_text(encoding="utf-8")
+    assert source.read_bytes() == source_before
+
+    source.write_bytes(source_before + "\n추가 원자료\n".encode())
+    changed_source = prepare_novel_wiki_projection(vault, novel, projection_day=date(2026, 8, 28))
+    assert json.loads(changed_source.manifest)["projection_day"] == "2026-08-28"
+
+    duplicate = new_project.with_name("중복.md")
+    duplicate.write_bytes(new_project.read_bytes())
+    with pytest.raises(WoonError, match="Duplicate Novel canonical ID"):
+        prepare_novel_wiki_projection(vault, novel, projection_day=date(2026, 8, 27))
 
 
 def test_groups_large_event_timeline_into_linear_stages(tmp_path: Path) -> None:
@@ -216,7 +401,7 @@ def test_groups_large_event_timeline_into_linear_stages(tmp_path: Path) -> None:
     _page(
         vault / "wiki/personal/projects/(미정)소설-집필.md",
         title="(미정)소설 집필",
-        canonical_id="private-novel",
+        canonical_id="personal/projects/private-novel-writing",
         node_kind="entity",
         parent="[[wiki/projects|프로젝트]]",
         entity_kind="project",

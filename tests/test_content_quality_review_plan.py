@@ -181,6 +181,195 @@ def test_batches_never_combine_pages_past_the_character_limit() -> None:
     ]
 
 
+def test_plan_excludes_private_novel_bytes_before_any_review_runner(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _write_vault(vault)
+    novel_markdown = _markdown("소설 원문")
+    novel_path = vault / "wiki/private/novel/scene.md"
+    novel_path.parent.mkdir(parents=True)
+    novel_path.write_text(novel_markdown, encoding="utf-8")
+    pages_path = vault / "catalog/llm-wiki/pages.yaml"
+    receipts_path = vault / "catalog/llm-wiki/receipts.yaml"
+    pages = yaml.safe_load(pages_path.read_text(encoding="utf-8"))
+    receipts = yaml.safe_load(receipts_path.read_text(encoding="utf-8"))
+    pages["pages"].append(
+        {
+            "page_id": "private/novel/scene",
+            "output_path": "private/novel/scene.md",
+            "title": "소설 원문",
+        }
+    )
+    receipts["receipts"].append(
+        {
+            "page_id": "private/novel/scene",
+            "output_sha256": hashlib.sha256(novel_markdown.encode("utf-8")).hexdigest(),
+        }
+    )
+    pages_path.write_text(
+        yaml.safe_dump(pages, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    receipts_path.write_text(
+        yaml.safe_dump(receipts, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    standard, prompt = _write_standards(tmp_path)
+
+    report = create_content_quality_review_plan(
+        vault,
+        standard,
+        "repo://skills/standards/learning-writing-harness.md",
+        prompt,
+        "repo://skills/standards/learning-quality-review-prompt.md",
+        tmp_path / "plan",
+        4,
+    )
+    manifest = json.loads((tmp_path / "plan/manifest.json").read_text(encoding="utf-8"))
+
+    assert report["compiled_pages"] == 2
+    assert all(
+        target["page_id"] != "private/novel/scene"
+        for batch in manifest["batches"]
+        for target in batch["targets"]
+    )
+
+
+def test_plan_excludes_entire_explicit_book_reader_lineage(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _write_vault(vault)
+    root_markdown = _markdown("책")
+    child_markdown = _markdown("1장")
+    for relative, markdown in {
+        "personal/book.md": root_markdown,
+        "personal/book/chapter-01.md": child_markdown,
+    }.items():
+        path = vault / "wiki" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(markdown, encoding="utf-8")
+    pages_path = vault / "catalog/llm-wiki/pages.yaml"
+    receipts_path = vault / "catalog/llm-wiki/receipts.yaml"
+    pages = yaml.safe_load(pages_path.read_text(encoding="utf-8"))
+    receipts = yaml.safe_load(receipts_path.read_text(encoding="utf-8"))
+    pages["pages"].extend(
+        [
+            {
+                "page_id": "personal/book",
+                "output_path": "personal/book.md",
+                "title": "책",
+                "frontmatter": {"content_kind": "book"},
+            },
+            {
+                "page_id": "personal/book/chapter-01",
+                "output_path": "personal/book/chapter-01.md",
+                "title": "1장",
+            },
+        ]
+    )
+    receipts["receipts"].extend(
+        [
+            {
+                "page_id": "personal/book",
+                "output_sha256": hashlib.sha256(root_markdown.encode("utf-8")).hexdigest(),
+            },
+            {
+                "page_id": "personal/book/chapter-01",
+                "output_sha256": hashlib.sha256(child_markdown.encode("utf-8")).hexdigest(),
+            },
+        ]
+    )
+    pages_path.write_text(
+        yaml.safe_dump(pages, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    receipts_path.write_text(
+        yaml.safe_dump(receipts, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    standard, prompt = _write_standards(tmp_path)
+
+    report = create_content_quality_review_plan(
+        vault,
+        standard,
+        "repo://skills/standards/learning-writing-harness.md",
+        prompt,
+        "repo://skills/standards/learning-quality-review-prompt.md",
+        tmp_path / "plan",
+        4,
+    )
+    manifest = json.loads((tmp_path / "plan/manifest.json").read_text(encoding="utf-8"))
+
+    assert report["compiled_pages"] == 2
+    assert report["excluded_pages"] == 2
+    assert [item["page_id"] for item in manifest["exclusions"]] == [
+        "personal/book",
+        "personal/book/chapter-01",
+    ]
+    assert all(
+        not target["page_id"].startswith("personal/book")
+        for batch in manifest["batches"]
+        for target in batch["targets"]
+    )
+
+
+def test_plan_excludes_explicit_link_only_source_index_before_any_review_runner(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _write_vault(vault)
+    source_markdown = "# 원자료 색인\n\n- [[wiki/os/first|첫 문서]]\n"
+    source_path = vault / "wiki/resources/sources.md"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(source_markdown, encoding="utf-8")
+    pages_path = vault / "catalog/llm-wiki/pages.yaml"
+    receipts_path = vault / "catalog/llm-wiki/receipts.yaml"
+    pages = yaml.safe_load(pages_path.read_text(encoding="utf-8"))
+    receipts = yaml.safe_load(receipts_path.read_text(encoding="utf-8"))
+    pages["pages"].append(
+        {
+            "page_id": "resources/sources",
+            "output_path": "resources/sources.md",
+            "title": "원자료 색인",
+            "frontmatter": {"content_kind": "source-index"},
+        }
+    )
+    receipts["receipts"].append(
+        {
+            "page_id": "resources/sources",
+            "output_sha256": hashlib.sha256(source_markdown.encode("utf-8")).hexdigest(),
+        }
+    )
+    pages_path.write_text(
+        yaml.safe_dump(pages, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    receipts_path.write_text(
+        yaml.safe_dump(receipts, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    standard, prompt = _write_standards(tmp_path)
+
+    report = create_content_quality_review_plan(
+        vault,
+        standard,
+        "repo://skills/standards/learning-writing-harness.md",
+        prompt,
+        "repo://skills/standards/learning-quality-review-prompt.md",
+        tmp_path / "plan",
+        4,
+    )
+    manifest = json.loads((tmp_path / "plan/manifest.json").read_text(encoding="utf-8"))
+
+    assert report["compiled_pages"] == 2
+    assert manifest["exclusions"] == [
+        {
+            "page_id": "resources/sources",
+            "relative_path": "wiki/resources/sources.md",
+            "title": "원자료 색인",
+            "output_sha256": hashlib.sha256(source_markdown.encode("utf-8")).hexdigest(),
+            "reason": "source-index-contract",
+        }
+    ]
+    assert all(
+        target["page_id"] != "resources/sources"
+        for batch in manifest["batches"]
+        for target in batch["targets"]
+    )
+
+
 def test_creates_resumable_review_batches_and_assembles_current_payload(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     _write_vault(vault)

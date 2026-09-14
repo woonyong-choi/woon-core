@@ -65,6 +65,36 @@ def test_upserts_a_small_general_person_card_idempotently(tmp_path: Path) -> Non
     assert service.find("희준") == (second.card,)
 
 
+def test_person_card_has_native_metadata_and_repeated_create_preserves_added_facts(
+    tmp_path: Path,
+) -> None:
+    import yaml
+
+    service = _service(tmp_path)
+    request = {
+        "person_id": "confirmed-person",
+        "title": "정정열",
+        "person_kind": "related-person",
+        "relationship_to_owner": "사용자가 확인한 동료",
+        "purpose": "확인된 역할과 자료를 연결한다.",
+        "creation_basis": "explicit-request",
+    }
+    first = service.upsert_card(**request)
+    path = tmp_path / first.card.relative_path
+    metadata = yaml.safe_load(path.read_text().split("---", 2)[1])
+    assert metadata["summary"] == request["relationship_to_owner"]
+    assert metadata["purpose"] == request["purpose"]
+    assert metadata["record_owner"] == "choi-woonyoung"
+    assert metadata["lifecycle_status"] == "active"
+    path.write_text(path.read_text() + "\n사용자가 확인한 신상과 원자료 링크.\n")
+    before = path.read_bytes()
+    again = service.upsert_card(**request)
+    assert again.changed is False and path.read_bytes() == before
+    with pytest.raises(WoonError, match="reviewed native Wiki update"):
+        service.upsert_card(**{**request, "relationship_to_owner": "다른 역할"})
+    assert path.read_bytes() == before
+
+
 def test_links_one_document_with_explicit_roles_without_duplicate_entries(tmp_path: Path) -> None:
     service = _service(tmp_path)
     service.upsert_card(
@@ -126,11 +156,14 @@ def test_ignores_auxiliary_markdown_without_a_title_during_dashboard_lookup(tmp_
     assert service.documents_for("choi-woonyoung") == ()
 
 
-def test_default_owner_finds_existing_records_without_mass_metadata_rewrite(tmp_path: Path) -> None:
+def test_owner_records_require_explicit_opt_in_without_mass_metadata_rewrite(
+    tmp_path: Path,
+) -> None:
     service = _service(tmp_path)
     _write_document(tmp_path / "brain/decision.md", title="학습 결정")
 
-    documents = service.documents_for("choi-woonyoung")
+    assert service.documents_for("choi-woonyoung") == ()
+    documents = service.documents_for("choi-woonyoung", include_owned=True)
 
     assert [document.relative_path for document in documents] == ["brain/decision.md"]
     assert documents[0].record_owner == "choi-woonyoung"
@@ -369,6 +402,13 @@ def test_rejects_guess_driven_cards_and_private_link_targets(tmp_path: Path) -> 
     with pytest.raises(WoonError, match="private originals"):
         service.link_document(
             relative_path="wiki/private/_sources/knowledge/private/example.md",
+            person_id="kim-heejun",
+            roles=("participant",),
+            evidence="명시된 참석자",
+        )
+    with pytest.raises(WoonError, match="private originals"):
+        service.link_document(
+            relative_path="private/knowledge/private/example.md",
             person_id="kim-heejun",
             roles=("participant",),
             evidence="명시된 참석자",

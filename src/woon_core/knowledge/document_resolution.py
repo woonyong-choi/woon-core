@@ -19,6 +19,7 @@ from typing import Any
 
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write, encode_json, exclusive_file_lock
+from woon_core.knowledge.source_boundary import is_private_source_relative
 
 DOCUMENT_RESOLUTION_VERSION = 1
 _CANDIDATE_ID = re.compile(r"docling-[0-9a-f]{64}")
@@ -84,7 +85,30 @@ def resolve_document_candidate(
     normalized = _validate_decision(root, decision)
     candidate_id = normalized["candidate_id"]
     runtime = root / ".local/woon-knowledge/document-intake"
+    lock_path = _inside(root, f".local/woon-knowledge/document-intake/locks/{candidate_id}.lock")
+    with exclusive_file_lock(lock_path):
+        return _resolve_locked(root, runtime, candidate_id, normalized, decision_bytes)
+
+
+def _resolve_locked(
+    root: Path,
+    runtime: Path,
+    candidate_id: str,
+    normalized: dict[str, Any],
+    decision_bytes: bytes,
+) -> DocumentResolutionResult:
     candidate_directory = runtime / "candidates" / candidate_id
+    existing_path = runtime / "resolutions" / f"{candidate_id}.json"
+    if existing_path.is_file():
+        existing = read_document_resolution(root, candidate_id)
+        if existing["decision_sha256"] != hashlib.sha256(decision_bytes).hexdigest():
+            raise WoonError(f"document candidate already has another resolution: {candidate_id}")
+        return DocumentResolutionResult(
+            candidate_id,
+            existing["disposition"],
+            existing_path.relative_to(root).as_posix(),
+            True,
+        )
     candidate_receipt_path = candidate_directory / "receipt.json"
     candidate_receipt = _verified_candidate_receipt(candidate_directory, candidate_id)
     legacy_candidate = candidate_receipt.get("promotion_state") == "review-required"
@@ -119,30 +143,14 @@ def resolve_document_candidate(
         ),
     }
     receipt_path = runtime / "resolutions" / f"{candidate_id}.json"
-    lock_path = runtime / "locks" / f"resolution-{candidate_id}.lock"
-    with exclusive_file_lock(lock_path):
-        replayed = receipt_path.is_file()
-        if replayed:
-            existing = _load_json(receipt_path, "document resolution receipt")
-            comparable = dict(existing)
-            comparable.pop("resolved_at", None)
-            if comparable != stable_receipt:
-                raise WoonError(
-                    f"document candidate already has another resolution: {candidate_id}"
-                )
-        else:
-            receipt_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            receipt_path.parent.chmod(0o700)
-            receipt = {
-                **stable_receipt,
-                "resolved_at": datetime.now(UTC).isoformat(),
-            }
-            atomic_write(receipt_path, encode_json(receipt), mode=0o600)
+    receipt_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    receipt = {**stable_receipt, "resolved_at": datetime.now(UTC).isoformat()}
+    atomic_write(receipt_path, encode_json(receipt), mode=0o600)
     return DocumentResolutionResult(
         candidate_id=candidate_id,
         disposition=normalized["disposition"],
         receipt=receipt_path.relative_to(root).as_posix(),
-        replayed=replayed,
+        replayed=False,
     )
 
 
@@ -166,30 +174,28 @@ def audit_document_resolutions(vault: Path) -> DocumentResolutionAudit:
     errors: list[str] = []
     user_action: list[str] = []
     resolved = 0
-    for candidate_id, candidate_directory in candidates.items():
+    for candidate_id in sorted(set(candidates) | set(resolutions)):
+        if candidate_id in resolutions:
+            try:
+                receipt = read_document_resolution(root, candidate_id)
+            except WoonError as error:
+                errors.append(str(error))
+                continue
+            if receipt.get("status") == "user-action-required":
+                user_action.append(candidate_id)
+            elif receipt.get("cleanup", {}).get("state") == "pending":
+                errors.append(f"document candidate cleanup pending: {candidate_id}")
+            else:
+                resolved += 1
+            continue
+        candidate_directory = candidates[candidate_id]
         try:
-            candidate_receipt = _verified_candidate_receipt(candidate_directory, candidate_id)
+            _verified_candidate_receipt(candidate_directory, candidate_id)
         except WoonError as error:
             errors.append(str(error))
-            continue
-        resolution_path = resolutions.get(candidate_id)
-        if resolution_path is None:
-            continue
-        try:
-            receipt = _load_json(resolution_path, "document resolution receipt")
-            _validate_resolution_receipt(root, candidate_directory, candidate_receipt, receipt)
-        except WoonError as error:
-            errors.append(str(error))
-            continue
-        if receipt.get("status") == "user-action-required":
-            user_action.append(candidate_id)
-        else:
-            resolved += 1
-    orphaned = sorted(set(resolutions).difference(candidates))
-    errors.extend(f"orphan document resolution: {candidate_id}" for candidate_id in orphaned)
     pending = tuple(sorted(set(candidates).difference(resolutions)))
     return DocumentResolutionAudit(
-        candidates=len(candidates),
+        candidates=len(set(candidates) | set(resolutions)),
         resolved=resolved,
         pending=pending,
         user_action_required=tuple(sorted(user_action)),
@@ -273,6 +279,8 @@ def _safe_paths(value: object, field: str) -> tuple[str, ...]:
 
 
 def _verified_candidate_receipt(directory: Path, candidate_id: str) -> dict[str, Any]:
+    if directory.is_symlink() or any(p.is_symlink() for p in directory.glob("*")):
+        raise WoonError("document candidate must not contain symlinks")
     receipt = _load_json(directory / "receipt.json", "document candidate receipt")
     promotion_state = receipt.get("promotion_state")
     if (
@@ -333,10 +341,7 @@ def _observed_targets(
     source_hash = candidate_receipt.get("source", {}).get("sha256")
     for relative in decision["source_targets"]:
         path = _inside(root, relative)
-        if (
-            Path(relative).parts[:4] != ("wiki", "private", "_sources", "knowledge")
-            or not path.is_file()
-        ):
+        if not is_private_source_relative(relative) or not path.is_file():
             raise WoonError("document resolution source target must be Wiki-owned evidence")
         digest = _sha256(path)
         if digest != source_hash:
@@ -364,6 +369,11 @@ def _validate_resolution_receipt(
         raise WoonError(f"document resolution receipt mismatch: {candidate_id}")
     if receipt.get("reason_code") not in _REASONS[receipt["disposition"]]:
         raise WoonError(f"document resolution reason mismatch: {candidate_id}")
+    _validate_resolution_targets(root, receipt)
+
+
+def _validate_resolution_targets(root: Path, receipt: dict[str, Any]) -> None:
+    candidate_id = receipt["candidate_id"]
     canonical = receipt.get("canonical")
     source_targets = receipt.get("source_targets")
     if not isinstance(canonical, list) or not isinstance(source_targets, list):
@@ -396,7 +406,7 @@ def _validate_resolution_receipt(
         ):
             raise WoonError(f"document resolution canonical target is missing: {candidate_id}")
 
-    source_hash = candidate_receipt.get("source", {}).get("sha256")
+    source_hash = receipt.get("source_sha256")
     for record in source_targets:
         if not isinstance(record, dict):
             raise WoonError(f"document resolution source record is invalid: {candidate_id}")
@@ -406,7 +416,7 @@ def _validate_resolution_receipt(
             raise WoonError(f"document resolution source record is invalid: {candidate_id}")
         path = _inside(root, relative)
         if (
-            Path(relative).parts[:4] != ("wiki", "private", "_sources", "knowledge")
+            not is_private_source_relative(relative)
             or not path.is_file()
             or _sha256(path) != source_hash
         ):
@@ -414,10 +424,156 @@ def _validate_resolution_receipt(
 
 
 def _inside(root: Path, relative: str) -> Path:
-    path = (root / relative).resolve()
-    if not path.is_relative_to(root):
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
         raise WoonError("document resolution path escapes the knowledge vault")
+    path = root / candidate
+    current = root
+    for part in candidate.parts:
+        current /= part
+        if current.is_symlink():
+            raise WoonError("document resolution rejects symlink paths")
     return path
+
+
+def read_document_resolution(vault: Path, candidate_id: str) -> dict[str, Any]:
+    """Read a terminal result even after its explicitly consumed extraction was removed."""
+    root = vault.expanduser().resolve()
+    if not _CANDIDATE_ID.fullmatch(candidate_id):
+        raise WoonError("invalid document candidate ID")
+    runtime = ".local/woon-knowledge/document-intake"
+    path = _inside(root, f"{runtime}/resolutions/{candidate_id}.json")
+    directory = _inside(root, f"{runtime}/candidates/{candidate_id}")
+    receipt = _load_json(path, "document resolution receipt")
+    if receipt.get("version") == 1:
+        candidate = _verified_candidate_receipt(directory, candidate_id)
+        _validate_resolution_receipt(root, directory, candidate, receipt)
+    elif receipt.get("version") == 2:
+        cleanup = receipt.get("cleanup", {})
+        if (
+            receipt.get("candidate_id") != candidate_id
+            or receipt.get("status") != "resolved"
+            or receipt.get("disposition") not in {"integrated", "duplicate", "discarded"}
+            or receipt.get("reason_code") not in _REASONS[receipt["disposition"]]
+            or any(
+                not _valid_sha256(receipt.get(k))
+                for k in (
+                    "candidate_receipt_sha256",
+                    "document_sha256",
+                    "source_sha256",
+                    "decision_sha256",
+                )
+            )
+            or not isinstance(cleanup, dict)
+            or cleanup.get("state") not in {"pending", "removed"}
+            or not _valid_sha256(cleanup.get("previous_receipt_sha256"))
+        ):
+            raise WoonError(f"invalid compact document resolution: {candidate_id}")
+        _validate_resolution_targets(root, receipt)
+        if cleanup["state"] == "removed":
+            if directory.exists():
+                raise WoonError(f"removed document candidate reappeared: {candidate_id}")
+        else:
+            _verify_cleanup_files(directory, cleanup.get("files"))
+    else:
+        raise WoonError("unsupported document resolution version")
+    return receipt
+
+
+def cleanup_document_candidate(
+    vault: Path,
+    candidate_id: str,
+    *,
+    expected_resolution_sha256: str,
+) -> dict[str, Any]:
+    """Remove exact owned extraction files after a verified terminal decision.
+
+    The compact receipt precedes removal and carries the remaining file hashes
+    only during recovery. It preserves no source bytes and promises no recovery
+    of deleted bytes. Unknown files and concurrent edits stop cleanup.
+    """
+    root = vault.expanduser().resolve()
+    if not _CANDIDATE_ID.fullmatch(candidate_id):
+        raise WoonError("invalid document candidate ID")
+    runtime = ".local/woon-knowledge/document-intake"
+    path = _inside(root, f"{runtime}/resolutions/{candidate_id}.json")
+    directory = _inside(root, f"{runtime}/candidates/{candidate_id}")
+    lock = _inside(root, f"{runtime}/locks/{candidate_id}.lock")
+    with exclusive_file_lock(lock):
+        receipt = read_document_resolution(root, candidate_id)
+        if receipt.get("cleanup", {}).get("state") == "removed":
+            return {
+                "candidate_id": candidate_id,
+                "removed": True,
+                "replayed": True,
+                "receipt_sha256": _sha256(path),
+            }
+        expected = receipt.get("cleanup", {}).get("previous_receipt_sha256", _sha256(path))
+        if expected_resolution_sha256 not in {_sha256(path), expected}:
+            raise WoonError("document resolution changed; reread before cleanup")
+        if receipt["status"] != "resolved":
+            raise WoonError("unresolved document candidates must be preserved")
+        if receipt.get("version") == 1:
+            candidate = _verified_candidate_receipt(directory, candidate_id)
+            files = {name: record["sha256"] for name, record in candidate["outputs"].items()}
+            files["receipt.json"] = _sha256(directory / "receipt.json")
+            _verify_cleanup_files(directory, files, allow_missing=False)
+            receipt.update(
+                version=2,
+                cleanup={
+                    "state": "pending",
+                    "previous_receipt_sha256": _sha256(path),
+                    "files": files,
+                },
+            )
+            atomic_write(path, encode_json(receipt), mode=0o600)
+        files = receipt["cleanup"]["files"]
+        _verify_cleanup_files(directory, files)
+        for name, expected_hash in files.items():
+            target = directory / name
+            if target.exists():
+                if target.is_symlink() or _sha256(target) != expected_hash:
+                    raise WoonError("document candidate changed before removal")
+                target.unlink()
+        if directory.exists():
+            directory.rmdir()
+        receipt["cleanup"].pop("files")
+        receipt["cleanup"]["state"] = "removed"
+        atomic_write(path, encode_json(receipt), mode=0o600)
+        read_document_resolution(root, candidate_id)
+        return {
+            "candidate_id": candidate_id,
+            "removed": True,
+            "replayed": False,
+            "receipt_sha256": _sha256(path),
+        }
+
+
+def _verify_cleanup_files(
+    directory: Path,
+    files: object,
+    *,
+    allow_missing: bool = True,
+) -> None:
+    if not isinstance(files, dict) or not files:
+        raise WoonError("document cleanup has no exact file inventory")
+    for name, digest in files.items():
+        if (
+            not isinstance(name, str)
+            or Path(name).name != name
+            or name in {".", ".."}
+            or not _valid_sha256(digest)
+        ):
+            raise WoonError("invalid document cleanup file inventory")
+    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+        raise WoonError("document cleanup requires a regular directory")
+    actual = tuple(directory.iterdir()) if directory.exists() else ()
+    if any(p.name not in files or p.is_symlink() or not p.is_file() for p in actual):
+        raise WoonError("document candidate has unknown files; preserve them")
+    if not allow_missing and {p.name for p in actual} != set(files):
+        raise WoonError("document candidate files are missing before cleanup")
+    if any(_sha256(p) != files[p.name] for p in actual):
+        raise WoonError("document candidate was edited; preserve it")
 
 
 def _load_json(path: Path, label: str) -> dict[str, Any]:

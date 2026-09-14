@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import subprocess
 import sys
@@ -11,14 +12,14 @@ from pathlib import Path
 
 import yaml
 
-from woon_core.calendar.constants import (
-    LINK_CALENDAR_DASHBOARD_CSS_CLASS,
-    LINK_CALENDAR_PLUGIN_ID,
-    LINK_CALENDAR_PROFILE_ID,
-)
 from woon_core.errors import WoonError
+from woon_core.knowledge.graph_colors import graph_color_issues, graph_color_projection
 from woon_core.knowledge.identity import validate_canonical_id
-from woon_core.knowledge.source_boundary import audit_source_boundary
+from woon_core.knowledge.source_boundary import (
+    SOURCE_ARCHIVE_RELATIVE,
+    audit_source_boundary,
+    source_storage_layout,
+)
 from woon_core.knowledge.wiki_tree import (
     LEGACY_TREE_FIELDS,
     load_wiki_tree,
@@ -72,7 +73,6 @@ SKIP_DIRS = {
     "types",
     "assets",
     "exports",
-    "_sources",
 }
 OPERATING_SKIP_DIRS = SKIP_DIRS - {"types"}
 TEMPLATE_SKIP_DIRS = SKIP_DIRS - {"templates"}
@@ -92,132 +92,7 @@ SOURCE_KINDS = {"web", "book", "lecture", "transcript", "clipping"}
 TEMPLATE_TYPES = {"Wiki", "키워드", "Source", "Creative", "Daily", "Operations"}
 OBSIDIAN_GRAPH_FILTER = "path:wiki tag:#graph/overview -path:wiki/private"
 OBSIDIAN_GRAPH_OVERVIEW_SCALE = 0.4
-OBSIDIAN_GRAPH_COLOR_GROUPS = (
-    (
-        "schedule",
-        "path:wiki tag:#graph/overview -path:wiki/private [type:calendar-event]",
-        12215116,
-    ),
-    (
-        "schedule",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "[entity_kind:/^(event|schedule)$/]",
-        12215116,
-    ),
-    (
-        "schedule",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "-[entity_kind:/^(event|schedule)$/] [facets:/^(일정|캘린더)$/]",
-        12215116,
-    ),
-    (
-        "person",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
-        "[entity_kind:person]",
-        11624045,
-    ),
-    (
-        "person",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
-        "-[entity_kind:person] [facets:인물]",
-        11624045,
-    ),
-    (
-        "project",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
-        "-[entity_kind:person] -[facets:인물] [entity_kind:project]",
-        5071478,
-    ),
-    (
-        "project",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
-        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
-        "[facets:프로젝트]",
-        5071478,
-    ),
-    (
-        "book",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
-        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
-        "-[facets:프로젝트] [entity_kind:book]",
-        9138114,
-    ),
-    (
-        "book",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
-        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
-        "-[facets:프로젝트] -[entity_kind:book] [facets:책]",
-        9138114,
-    ),
-    (
-        "resource",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
-        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
-        "-[facets:프로젝트] -[entity_kind:book] -[facets:책] "
-        "[entity_kind:resource]",
-        5214109,
-    ),
-    (
-        "resource",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
-        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
-        "-[facets:프로젝트] -[entity_kind:book] -[facets:책] "
-        "-[entity_kind:resource] [facets:리소스]",
-        5214109,
-    ),
-    (
-        "interview",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
-        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
-        "-[facets:프로젝트] -[entity_kind:book] -[facets:책] "
-        "-[entity_kind:resource] -[facets:리소스] "
-        "[entity_kind:/^interview-topic(?:-index)?$/]",
-        12558176,
-    ),
-    (
-        "concept",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
-        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
-        "-[facets:프로젝트] -[entity_kind:book] -[facets:책] "
-        "-[entity_kind:resource] -[facets:리소스] "
-        "-[entity_kind:/^interview-topic(?:-index)?$/] "
-        "[node_kind:/^(topic|detail)$/]",
-        4676924,
-    ),
-    (
-        "hub",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
-        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
-        "-[facets:프로젝트] -[entity_kind:book] -[facets:책] "
-        "-[entity_kind:resource] -[facets:리소스] "
-        "-[entity_kind:/^interview-topic(?:-index)?$/] "
-        "-[node_kind:/^(topic|detail)$/] [node_kind:/^(root|hub)$/]",
-        5471101,
-    ),
-    (
-        "entity",
-        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
-        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
-        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
-        "-[facets:프로젝트] -[entity_kind:book] -[facets:책] "
-        "-[entity_kind:resource] -[facets:리소스] "
-        "-[entity_kind:/^interview-topic(?:-index)?$/] "
-        "-[node_kind:/^(topic|detail)$/] -[node_kind:/^(root|hub)$/] "
-        "[node_kind:entity]",
-        8095636,
-    ),
-)
+
 GLOBAL_GRAPH_ROOT = "wiki/README.md"
 OBSIDIAN_FRONT_MATTER_TITLE_PLUGIN = "obsidian-front-matter-title-plugin"
 OBSIDIAN_EXPLORER_SNIPPET = "focus-workspace"
@@ -269,16 +144,27 @@ OBSIDIAN_HIDDEN_EXPLORER_PATHS = (
     "AGENTS.md",
     "CLAUDE.md",
 )
-OBSIDIAN_IGNORED_PATHS = (
+OBSIDIAN_COMMON_IGNORED_PATHS = (
     ".local/",
     "catalog/",
     "config/",
     "docs/",
     "evals/",
     "exports/",
-    "wiki/private/_sources/",
     ".json",
 )
+OBSIDIAN_IGNORED_PATHS = (
+    *OBSIDIAN_COMMON_IGNORED_PATHS,
+    f"{SOURCE_ARCHIVE_RELATIVE.as_posix()}/",
+)
+TARGET_RAW_SOURCE_ROOTS = (
+    Path("sources/knowledge/web"),
+    Path("private/knowledge"),
+    Path("private/novel"),
+    Path("private/codex"),
+    Path("private/legacy-wiki"),
+)
+TARGET_PRIVATE_KNOWLEDGE_ROOT = Path("private/knowledge")
 RETIRED_PRIVATE_NOVEL_ROOT = VAULT / "projects/writing"
 RETIRED_WORKSPACE_ROOTS = (
     "ai-reference",
@@ -318,10 +204,8 @@ VAULT_EXECUTABLE_SUFFIXES = {".py", ".sh", ".js", ".mjs", ".ts"}
 CALENDAR_PROJECTION_ROOT = "inbox/calendar/events"
 CALENDAR_ICS_PROJECTION_PATH = "inbox/calendar/apple-calendar.ics"
 CALENDAR_DASHBOARD_PROJECTION_PATH = "inbox/calendar/apple-calendar.md"
-CALENDAR_NOTION_DATABASE_FILENAME = "_database.md"
 CALENDAR_ICS_PROJECTION_PRODID = "PRODID:-//Woon//Apple Calendar Read-only Projection//KO"
 CALENDAR_PROJECTION_FILE_MODE = 0o400
-CALENDAR_PROJECTION_DIRECTORY_MODE = 0o500
 NONCANONICAL_MAP_ROOTS = ("maps/legacy/", "maps/samples/")
 ALLOWED_WIKI_FACETS = {"개념", "프로젝트", "리소스", "인물", "커리어", "학습", "생활"}
 ALLOWED_VISIBLE_ROOT_DIRECTORIES = {
@@ -334,6 +218,8 @@ ALLOWED_VISIBLE_ROOT_DIRECTORIES = {
     "exports",
     "inbox",
     "maps",
+    "private",
+    "sources",
     "templates",
     "types",
     "wiki",
@@ -351,6 +237,80 @@ TIMELINE_BLOCK_RE = re.compile(
 
 def rel(path: Path) -> str:
     return path.relative_to(VAULT).as_posix()
+
+
+def raw_source_roots(vault: Path) -> tuple[Path, ...]:
+    """Return every raw-source root relevant to the Vault's current layout.
+
+    A mixed tree remains excluded from human-facing scans while separately
+    reported as an error. This prevents a partial restructure from making raw
+    files look like canonical notes merely because one root moved first.
+    """
+
+    layout = source_storage_layout(vault)
+    if layout == "legacy":
+        return (SOURCE_ARCHIVE_RELATIVE,)
+    if layout == "target":
+        return TARGET_RAW_SOURCE_ROOTS
+    if layout == "mixed":
+        return (SOURCE_ARCHIVE_RELATIVE, *TARGET_RAW_SOURCE_ROOTS)
+    return ()
+
+
+def is_raw_source_path(path: Path, vault: Path | None = None) -> bool:
+    """Return whether a path belongs to a non-human raw source archive."""
+
+    vault = VAULT if vault is None else vault
+    try:
+        relative = path.relative_to(vault)
+    except ValueError:
+        return False
+    return any(relative.is_relative_to(root) for root in raw_source_roots(vault))
+
+
+def is_supported_raw_source_locator(value: str) -> bool:
+    """Accept the legacy or completed-restructure raw locator shapes only."""
+
+    candidate = Path(value)
+    return any(
+        candidate.is_relative_to(root)
+        for root in (SOURCE_ARCHIVE_RELATIVE, *TARGET_RAW_SOURCE_ROOTS)
+    )
+
+
+def source_archive_index_prefixes(vault: Path, source_name: str) -> tuple[str, ...]:
+    """Return per-source index locations used to cover a local-only archive."""
+
+    prefixes: list[str] = []
+    for root in raw_source_roots(vault):
+        if root == SOURCE_ARCHIVE_RELATIVE:
+            archive = root / "knowledge/local-only" / source_name
+        elif root == TARGET_PRIVATE_KNOWLEDGE_ROOT:
+            archive = root / "local-only" / source_name
+        else:
+            continue
+        prefixes.append(f"{archive.as_posix()}/")
+    return tuple(prefixes)
+
+
+def raw_source_layout_issues(vault: Path) -> list[str]:
+    """Keep legacy checks while accepting the completed source-restructure layout."""
+
+    layout = source_storage_layout(vault)
+    if layout == "mixed":
+        return ["raw source layout is mixed; complete source-restructure before auditing"]
+    if layout == "target":
+        return []
+    return list(audit_source_boundary(vault))
+
+
+def obsidian_ignored_paths(vault: Path) -> tuple[str, ...]:
+    """Keep raw archives out of Obsidian search for either supported layout."""
+
+    return (
+        *OBSIDIAN_COMMON_IGNORED_PATHS,
+        *(f"{root.as_posix()}/" for root in raw_source_roots(vault)),
+    )
 
 
 def unexpected_root_directory_issues(vault: Path) -> list[str]:
@@ -629,9 +589,9 @@ def daily_digest_embed_issues(vault: Path) -> list[str]:
 def vault_execution_ownership_issues(vault: Path) -> list[str]:
     """Reject executable maintenance code in the document Vault.
 
-    Raw source material may contain code under ``wiki/private/_sources``. This guard only
-    protects runnable top-level files and the retired ``scripts/`` runtime
-    folder, both of which must be owned by ``woon-core``.
+    Raw source material may contain code under either supported source layout.
+    This guard only protects runnable top-level files and the retired
+    ``scripts/`` runtime folder, both of which must be owned by ``woon-core``.
     """
 
     issues: list[str] = []
@@ -653,7 +613,7 @@ def iter_markdown() -> list[Path]:
         elif path.is_dir():
             for item in path.rglob("*.md"):
                 parts = set(item.relative_to(VAULT).parts)
-                if parts & SKIP_DIRS:
+                if parts & SKIP_DIRS or is_raw_source_path(item):
                     continue
                 files.append(item)
     return sorted(set(files))
@@ -670,7 +630,7 @@ def iter_content_files() -> list[Path]:
                 if not item.is_file():
                     continue
                 parts = set(item.relative_to(VAULT).parts)
-                if parts & SKIP_DIRS:
+                if parts & SKIP_DIRS or is_raw_source_path(item):
                     continue
                 files.append(item)
     return sorted(set(files))
@@ -686,7 +646,7 @@ def iter_managed_non_markdown_files() -> list[Path]:
             if not item.is_file() or item.suffix == ".md":
                 continue
             parts = set(item.relative_to(VAULT).parts)
-            if parts & {".git", ".obsidian", "quartz", "_sources"}:
+            if parts & {".git", ".obsidian", "quartz"} or is_raw_source_path(item):
                 continue
             files.append(item)
     return sorted(set(files))
@@ -701,7 +661,7 @@ def iter_operating_markdown() -> list[Path]:
         elif path.is_dir():
             for item in path.rglob("*.md"):
                 parts = set(item.relative_to(VAULT).parts)
-                if parts & OPERATING_SKIP_DIRS:
+                if parts & OPERATING_SKIP_DIRS or is_raw_source_path(item):
                     continue
                 files.append(item)
     return sorted(set(files))
@@ -716,7 +676,7 @@ def iter_template_markdown() -> list[Path]:
         elif path.is_dir():
             for item in path.rglob("*.md"):
                 parts = set(item.relative_to(VAULT).parts)
-                if parts & TEMPLATE_SKIP_DIRS:
+                if parts & TEMPLATE_SKIP_DIRS or is_raw_source_path(item):
                     continue
                 files.append(item)
     return sorted(set(files))
@@ -735,7 +695,7 @@ def is_allowed_non_markdown_file(path: Path) -> bool:
     r = rel(path)
     if path.name == ".gitkeep" and r.startswith(("wiki/", "brain/wiki/")):
         return True
-    if path.suffix == ".base" and r.startswith(("inbox/", "wiki/private/_sources/knowledge/")):
+    if path.suffix == ".base" and (r.startswith("inbox/") or is_raw_source_path(path)):
         return True
     if r == CALENDAR_ICS_PROJECTION_PATH:
         return is_core_calendar_ics_projection(path)
@@ -743,8 +703,12 @@ def is_allowed_non_markdown_file(path: Path) -> bool:
         return is_noncanonical_map_archive(path) or is_valid_markdown_canvas(path)
     if r == "catalog/source-audits/inflearn-java-course-materials.json":
         return True
-    if r.startswith(
-        "wiki/private/_sources/knowledge/private/career/applications/"
+    if any(
+        r.startswith(prefix)
+        for prefix in (
+            "wiki/private/_sources/knowledge/private/career/applications/",
+            "private/knowledge/private/career/applications/",
+        )
     ) and path.suffix.casefold() in {".json", ".pdf", ".yaml", ".yml"}:
         return True
     if path.suffix != ".drawio":
@@ -768,138 +732,51 @@ def is_core_calendar_ics_projection(path: Path) -> bool:
     )
 
 
-def is_calendar_projection_markdown(path: Path) -> bool:
-    """Keep generated local calendar views out of knowledge-title quality checks."""
-
-    relative = rel(path)
-    return relative.startswith(f"{CALENDAR_PROJECTION_ROOT}/") or relative == (
-        CALENDAR_DASHBOARD_PROJECTION_PATH
-    )
-
-
-def calendar_projection_issues(vault: Path) -> list[str]:
-    """Validate Core-owned Markdown and ICS projections without editable calendar state."""
-
-    directory = vault / CALENDAR_PROJECTION_ROOT
-    ics_path = vault / CALENDAR_ICS_PROJECTION_PATH
-    dashboard_path = vault / CALENDAR_DASHBOARD_PROJECTION_PATH
-    directory_present = directory.exists() or directory.is_symlink()
-    ics_present = ics_path.exists() or ics_path.is_symlink()
-    dashboard_present = dashboard_path.exists() or dashboard_path.is_symlink()
-    if not directory_present and not ics_present and not dashboard_present:
-        return []
+def legacy_calendar_artifact_issues(vault: Path) -> list[str]:
+    """Check retained Apple artifacts without requiring or recreating their source profile."""
 
     issues: list[str] = []
-    if directory_present:
-        relative_directory = directory.relative_to(vault).as_posix()
-        scan_directory = True
+    directory = vault / CALENDAR_PROJECTION_ROOT
+    markdown: list[Path] = []
+    if directory.exists() or directory.is_symlink():
         if directory.is_symlink() or not _resolves_within(vault, directory):
-            issues.append(f"{relative_directory}: Core projection directory must be Vault-local")
-            scan_directory = False
+            issues.append(
+                f"{CALENDAR_PROJECTION_ROOT}: retained calendar directory must be Vault-local"
+            )
         elif not directory.is_dir():
-            issues.append(f"{relative_directory}: Core projection path must be a directory")
-            scan_directory = False
-        if scan_directory:
-            if directory.stat().st_mode & 0o777 != CALENDAR_PROJECTION_DIRECTORY_MODE:
-                issues.append(f"{relative_directory}: Core projection directory must be read-only")
-
-            for path in sorted(directory.glob("*.md")):
-                relative = path.relative_to(vault).as_posix()
-                if path.is_symlink() or not path.is_file() or not _resolves_within(vault, path):
-                    issues.append(f"{relative}: calendar projection must be a Vault-local file")
-                    continue
-                if path.name == ".prisma-virtual-events.md" or path.name == "Virtual Events.md":
-                    issues.append(f"{relative}: retired Prisma support file must be removed")
-                    continue
-                metadata = parse_frontmatter(path.read_text(encoding="utf-8"))
-                if path.name == CALENDAR_NOTION_DATABASE_FILENAME:
-                    issues.append(
-                        f"{relative}: retired Notion Bases calendar database must be removed"
-                    )
-                    continue
-                if metadata.get("woon_projection") != "apple-calendar":
-                    issues.append(f"{relative}: calendar projection marker is required")
-                if metadata.get("source") != "apple-calendar-readonly":
-                    issues.append(f"{relative}: calendar projection source must be read-only")
-                if metadata.get("type") != "calendar-event":
-                    issues.append(f"{relative}: calendar projection type must be calendar-event")
-                if not isinstance(metadata.get("title"), str) or not str(metadata["title"]).strip():
-                    issues.append(f"{relative}: calendar projection title is required")
-                if (
-                    not isinstance(metadata.get("calendar"), str)
-                    or not str(metadata["calendar"]).strip()
-                ):
-                    issues.append(f"{relative}: calendar projection calendar is required")
-                if (
-                    not isinstance(metadata.get("Date"), (str, date, datetime))
-                    or not str(metadata["Date"]).strip()
-                ):
-                    issues.append(f"{relative}: calendar projection requires Date")
-                if (
-                    not isinstance(metadata.get("Category"), str)
-                    or not str(metadata["Category"]).strip()
-                ):
-                    issues.append(f"{relative}: calendar projection requires Category")
-                all_day = metadata.get("All Day")
-                if all_day is False:
-                    for field in ("Start Date", "End Date"):
-                        if (
-                            not isinstance(metadata.get(field), (str, date, datetime))
-                            or not str(metadata[field]).strip()
-                        ):
-                            issues.append(f"{relative}: timed calendar projection requires {field}")
-                elif all_day is not True:
-                    issues.append(f"{relative}: calendar projection All Day must be boolean")
-                if path.stat().st_mode & 0o777 != CALENDAR_PROJECTION_FILE_MODE:
-                    issues.append(f"{relative}: calendar projection must be read-only")
-
-    if ics_present and (
+            issues.append(f"{CALENDAR_PROJECTION_ROOT}: retained calendar path must be a directory")
+        else:
+            markdown.extend(sorted(directory.glob("*.md")))
+    dashboard = vault / CALENDAR_DASHBOARD_PROJECTION_PATH
+    if dashboard.exists() or dashboard.is_symlink():
+        markdown.append(dashboard)
+    for path in markdown:
+        relative = path.relative_to(vault).as_posix()
+        if path.is_symlink() or not path.is_file() or not _resolves_within(vault, path):
+            issues.append(f"{relative}: retained calendar artifact must be a Vault-local file")
+            continue
+        try:
+            metadata = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except OSError:
+            issues.append(f"{relative}: retained calendar artifact must be readable")
+            continue
+        marker = metadata.get("woon_projection")
+        if not isinstance(marker, str) or marker not in {
+            "apple-calendar",
+            "apple-calendar-dashboard",
+        }:
+            continue
+        if path.stat().st_mode & 0o777 != CALENDAR_PROJECTION_FILE_MODE:
+            issues.append(f"{relative}: retained Apple Calendar artifact must remain read-only")
+    ics_path = vault / CALENDAR_ICS_PROJECTION_PATH
+    if (ics_path.exists() or ics_path.is_symlink()) and (
         ics_path.is_symlink()
         or not _resolves_within(vault, ics_path)
         or not is_core_calendar_ics_projection(ics_path)
     ):
         issues.append(
-            f"{CALENDAR_ICS_PROJECTION_PATH}: Core ICS projection must be Vault-local and read-only"
+            f"{CALENDAR_ICS_PROJECTION_PATH}: retained ICS must be Vault-local and read-only"
         )
-    if dashboard_present:
-        if (
-            dashboard_path.is_symlink()
-            or not dashboard_path.is_file()
-            or not _resolves_within(vault, dashboard_path)
-        ):
-            issues.append(
-                f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard must be a Vault-local file"
-            )
-        else:
-            try:
-                dashboard_content = dashboard_path.read_text(encoding="utf-8")
-            except OSError:
-                issues.append(f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard must be readable")
-                return issues
-            dashboard = parse_frontmatter(dashboard_content)
-            if dashboard.get("woon_projection") != "apple-calendar-dashboard":
-                issues.append(
-                    f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: Core dashboard marker is required"
-                )
-            if dashboard.get("source") != "apple-calendar-readonly":
-                issues.append(
-                    f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard source must be read-only"
-                )
-            if dashboard_path.stat().st_mode & 0o777 != CALENDAR_PROJECTION_FILE_MODE:
-                issues.append(f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard must be read-only")
-            required_dashboard = (
-                f"cssclasses: {LINK_CALENDAR_DASHBOARD_CSS_CLASS}\n"
-                "---\n\n"
-                f"```{LINK_CALENDAR_PLUGIN_ID}\n"
-                f"profile: {LINK_CALENDAR_PROFILE_ID}\n"
-                "```"
-            )
-            if required_dashboard not in dashboard_content:
-                issues.append(
-                    f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard must embed Link Calendar"
-                )
-    elif directory_present or ics_present:
-        issues.append(f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: Core dashboard is required")
     return issues
 
 
@@ -909,6 +786,38 @@ def _resolves_within(vault: Path, path: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def home_navigation_issues(vault: Path) -> list[str]:
+    """Check the private Home menu without rewriting user-owned activity or links."""
+    home = vault / "brain/home.md"
+    if not home.is_file():
+        return []
+    text = home.read_text(encoding="utf-8")
+    issues = []
+    for embed in (
+        "![[../inbox/inbox-review.base#검토 대기]]",
+        "![[../inbox/daily/daily.base#일일 이력]]",
+    ):
+        if embed not in text:
+            issues.append(f"brain/home.md must reuse {embed} instead of a duplicate table")
+    menu = re.search(r"(?ms)^## 빠른 이동[^\S\n]*\n(.*?)(?=^## |\Z)", text)
+    targets = (
+        [target.removesuffix(".md") for target in WIKILINK_RE.findall(menu.group(1))]
+        if menu
+        else []
+    )
+    # The root still owns the Wiki tree; it is not a second shortcut on Home.
+    for target in (
+        "../wiki/Wiki/developer-wiki",
+        "../wiki/personal/projects/README",
+        "../wiki/people/README",
+    ):
+        if targets.count(target) != 1:
+            issues.append(f"brain/home.md quick navigation must link once to {target}")
+    if "../wiki/README" in targets:
+        issues.append("brain/home.md quick navigation must not restore a second overall Wiki entry")
+    return issues
 
 
 def is_valid_markdown_canvas(path: Path) -> bool:
@@ -987,9 +896,14 @@ def clean_value(value: str) -> object:
 def retired_external_video_boundary_issues(vault: Path) -> list[str]:
     """Reject a retired video archive instead of silently preserving new captures."""
 
-    if (vault / "wiki/private/_sources/knowledge/external-video").exists():
+    retired_roots = (
+        SOURCE_ARCHIVE_RELATIVE / "knowledge/external-video",
+        Path("sources/knowledge/web/external-video"),
+        TARGET_PRIVATE_KNOWLEDGE_ROOT / "external-video",
+    )
+    if any((vault / root).exists() for root in retired_roots):
         return [
-            "wiki/private/_sources/knowledge/external-video is retired; "
+            "raw-source external-video archive is retired; "
             "keep changing video links out of the canonical Vault"
         ]
     return []
@@ -1014,7 +928,6 @@ def retired_ai_instruction_boundary_issues(vault: Path) -> list[str]:
         ".local",
         ".legacy-backup",
         ".obsidian",
-        "_sources",
         "scripts",
         "quartz",
     }
@@ -1023,6 +936,8 @@ def retired_ai_instruction_boundary_issues(vault: Path) -> list[str]:
             continue
         relative = path.relative_to(vault)
         if excluded_roots.intersection(relative.parts):
+            continue
+        if is_raw_source_path(path, vault):
             continue
         if relative.parts[:2] in {
             ("catalog", "sources"),
@@ -1495,7 +1410,7 @@ def canonical_wiki_link_issues(
     ambiguous: list[str] = []
     for path, text in texts.items():
         relative = path.relative_to(vault).as_posix()
-        if not relative.startswith("wiki/") or relative.startswith("wiki/private/_sources/"):
+        if not relative.startswith("wiki/") or is_raw_source_path(path, vault):
             continue
         link_text = strip_inline_code(strip_fenced_blocks(text)).replace("\\|", "|")
         for target in WIKILINK_RE.findall(link_text):
@@ -1527,8 +1442,10 @@ def global_graph_root_issues(
 
     def is_visible(path: Path) -> bool:
         relative = rel(path)
-        return relative.startswith(("wiki/", "maps/")) and not relative.startswith(
-            ("wiki/private/", *NONCANONICAL_MAP_ROOTS)
+        return (
+            relative.startswith(("wiki/", "maps/"))
+            and not is_raw_source_path(path)
+            and not relative.startswith(("wiki/private/", *NONCANONICAL_MAP_ROOTS))
         )
 
     by_relative = {rel(path): path for path in files}
@@ -1741,14 +1658,17 @@ def source_catalog_boundary_issues(vault: Path) -> list[str]:
         else:
             subject_text = (vault / wiki_subject).read_text(encoding="utf-8")
         source_name = payload.get("source") if isinstance(payload, dict) else None
-        archive_prefix = (
-            f"wiki/private/_sources/knowledge/local-only/{source_name}/"
+        archive_prefixes = (
+            source_archive_index_prefixes(vault, source_name)
             if isinstance(source_name, str) and source_name
-            else ""
+            else ()
         )
         subject_links = set(WIKILINK_RE.findall(subject_text)) if subject_text else set()
         links_archive_index = bool(
-            archive_prefix and any(link.startswith(archive_prefix) for link in subject_links)
+            archive_prefixes
+            and any(
+                link.startswith(prefix) for prefix in archive_prefixes for link in subject_links
+            )
         )
         if not isinstance(records, list):
             issues.append(f"{path.relative_to(vault)}: source catalog records must be a list")
@@ -1761,16 +1681,17 @@ def source_catalog_boundary_issues(vault: Path) -> list[str]:
             if state in {"external-private", "external-private-existing"}:
                 issues.append(
                     f"{path.relative_to(vault)}: external-private source must move into "
-                    "wiki/private/_sources/**"
+                    "an approved raw-source root"
                 )
                 continue
             if state != "canonical":
                 continue
             target = record.get("target")
             expected = record.get("target_sha256")
-            if not isinstance(target, str) or not target.startswith("wiki/private/_sources/"):
+            if not isinstance(target, str) or not is_supported_raw_source_locator(target):
                 issues.append(
-                    f"{path.relative_to(vault)}: canonical source target escapes the Wiki boundary"
+                    f"{path.relative_to(vault)}: canonical source target escapes "
+                    "the raw source boundary"
                 )
                 continue
             target_path = vault / target
@@ -1780,10 +1701,16 @@ def source_catalog_boundary_issues(vault: Path) -> list[str]:
             digest = hashlib.sha256(target_path.read_bytes()).hexdigest()
             if digest != expected:
                 issues.append(f"{path.relative_to(vault)}: canonical source target hash drift")
+            target_is_linked = (
+                target in subject_links or target.removesuffix(".md") in subject_links
+            )
             if (
                 subject_text
-                and target not in subject_links
-                and not (target.startswith(archive_prefix) and links_archive_index)
+                and not target_is_linked
+                and not (
+                    any(target.startswith(prefix) for prefix in archive_prefixes)
+                    and links_archive_index
+                )
             ):
                 issues.append(
                     f"{path.relative_to(vault)}: canonical source target is not linked "
@@ -1792,7 +1719,7 @@ def source_catalog_boundary_issues(vault: Path) -> list[str]:
     return issues
 
 
-def obsidian_graph_config_issues(graph_config: object) -> list[str]:
+def obsidian_graph_config_issues(graph_config: object, *, vault: Path | None = None) -> list[str]:
     issues: list[str] = []
     if not isinstance(graph_config, dict):
         return ["graph.json must contain an object"]
@@ -1806,36 +1733,24 @@ def obsidian_graph_config_issues(graph_config: object) -> list[str]:
         issues.append("tags must be hidden")
     if graph_config.get("showOrphans") is not False:
         issues.append("orphan nodes must be hidden")
-    if graph_config.get("scale") != OBSIDIAN_GRAPH_OVERVIEW_SCALE:
-        issues.append(f"overview scale must be {OBSIDIAN_GRAPH_OVERVIEW_SCALE}")
+    scale = graph_config.get("scale")
+    if (
+        not isinstance(scale, (int, float))
+        or isinstance(scale, bool)
+        or not math.isfinite(scale)
+        or scale <= 0
+    ):
+        issues.append("overview scale must be a positive finite number")
 
-    expected_groups = [
-        {"query": query, "color": {"a": 1, "rgb": rgb}}
-        for _kind, query, rgb in OBSIDIAN_GRAPH_COLOR_GROUPS
-    ]
-    color_groups = graph_config.get("colorGroups")
-    if color_groups != expected_groups:
-        issues.append("colorGroups must match the exclusive semantic priority policy")
-    if isinstance(color_groups, list):
-        for group in color_groups:
-            query = group.get("query", "") if isinstance(group, dict) else ""
-            if " OR " in query:
-                issues.append(f"color group must not use boolean OR: {query}")
-            if "path:wiki" not in query or "tag:#graph/overview" not in query:
-                issues.append(f"color group is outside graph overview scope: {query}")
-            if "-path:wiki/private" not in query:
-                issues.append(f"color group must exclude private notes: {query}")
-
-    semantic_colors: dict[int, str] = {}
-    for kind, _query, rgb in OBSIDIAN_GRAPH_COLOR_GROUPS:
-        previous = semantic_colors.setdefault(rgb, kind)
-        if previous != kind:
-            issues.append(f"semantic color is reused by {previous!r} and {kind!r}")
+    try:
+        issues.extend(graph_color_issues(graph_config, graph_color_projection(vault or VAULT)))
+    except WoonError as error:
+        issues.append(str(error))
     return issues
 
 
 def main() -> int:
-    files = [path for path in iter_markdown() if not is_calendar_projection_markdown(path)]
+    files = iter_markdown()
     index = target_index(files)
     issues: dict[str, list[str]] = {
         "missing_frontmatter": [],
@@ -1898,9 +1813,9 @@ def main() -> int:
     if RETIRED_PRIVATE_NOVEL_ROOT.exists():
         issues["private_novel_boundary_violations"].append(
             "projects/writing is retired; Novel sources belong in "
-            "wiki/private/_sources/novel and navigation belongs in wiki/private/novel"
+            "the approved raw-source boundary and navigation belongs in wiki/private/novel"
         )
-    issues["source_boundary_violations"].extend(audit_source_boundary(VAULT))
+    issues["source_boundary_violations"].extend(raw_source_layout_issues(VAULT))
     issues["source_policy_violations"].extend(source_catalog_boundary_issues(VAULT))
 
     issues["retired_external_video_boundary_violations"].extend(
@@ -1916,7 +1831,7 @@ def main() -> int:
     )
     issues["person_schema_violations"].extend(person_schema_issues(VAULT))
     issues["vault_execution_ownership_violations"].extend(vault_execution_ownership_issues(VAULT))
-    issues["calendar_projection_violations"].extend(calendar_projection_issues(VAULT))
+    issues["calendar_projection_violations"].extend(legacy_calendar_artifact_issues(VAULT))
     issues["daily_digest_projection_violations"].extend(daily_digest_embed_issues(VAULT))
     issues["runtime_permission_violations"].extend(runtime_permission_issues(VAULT))
     issues["obsidian_workspace_violations"].extend(obsidian_workspace_issues(VAULT))
@@ -1963,26 +1878,7 @@ def main() -> int:
                 f"retired parallel navigation must be removed: {retired_map}"
             )
 
-    home_path = VAULT / "brain/home.md"
-    if home_path.is_file():
-        home_text = home_path.read_text(encoding="utf-8")
-        for required_embed in (
-            "![[../inbox/inbox-review.base#검토 대기]]",
-            "![[../inbox/daily/daily.base#일일 이력]]",
-        ):
-            if required_embed not in home_text:
-                issues["wiki_display_contract_violations"].append(
-                    f"brain/home.md must reuse {required_embed} instead of a duplicate table"
-                )
-        for required_link in (
-            "[[../wiki/README|Wiki]]",
-            "[[../wiki/personal/projects/README|프로젝트]]",
-            "[[../wiki/people/README|인물·관계]]",
-        ):
-            if required_link not in home_text:
-                issues["wiki_display_contract_violations"].append(
-                    f"brain/home.md must expose the human navigation link {required_link}"
-                )
+    issues["wiki_display_contract_violations"].extend(home_navigation_issues(VAULT))
 
     if not (VAULT / "wiki/README.md").is_file():
         issues["wiki_display_contract_violations"].append(
@@ -2048,7 +1944,7 @@ def main() -> int:
         if not isinstance(ignore_filters, list):
             issues["obsidian_graph_policy_violations"].append("userIgnoreFilters must be a list")
         else:
-            for ignored_path in OBSIDIAN_IGNORED_PATHS:
+            for ignored_path in obsidian_ignored_paths(VAULT):
                 if ignored_path not in ignore_filters:
                     issues["obsidian_graph_policy_violations"].append(
                         f"Obsidian must ignore {ignored_path!r}"
@@ -2377,9 +2273,9 @@ def main() -> int:
         if published and root not in QUARTZ_SYNC_ROOTS:
             issues["published_outside_quartz_scope"].append(r)
 
-        if (
-            r.startswith(("inbox/", "wiki/private/_sources/knowledge/")) or r == "head-quarter.md"
-        ) and (published or fm.get("access") != "local-only"):
+        if (r.startswith("inbox/") or is_raw_source_path(path) or r == "head-quarter.md") and (
+            published or fm.get("access") != "local-only"
+        ):
             issues["local_operational_published"].append(r)
 
         if r.startswith("inbox/"):
@@ -2442,7 +2338,12 @@ def main() -> int:
                                 f"{r}: person-memory review must not resolve or link a person"
                             )
 
-        if r.startswith("wiki/private/_sources/knowledge/private/"):
+        if r.startswith(
+            (
+                "wiki/private/_sources/knowledge/private/",
+                "private/knowledge/private/",
+            )
+        ):
             # Private originals are byte-preserved evidence, not compiler input.
             # Their historical frontmatter must not be rewritten merely to fit a
             # current Source schema; private paths are excluded from LLM search.
@@ -2450,10 +2351,17 @@ def main() -> int:
                 issues["source_policy_violations"].append(
                     f"{r}: private original must be publish:false and access:local-only"
                 )
-        elif (
-            r.startswith("wiki/private/_sources/knowledge/")
-            and r != "wiki/private/_sources/knowledge/README.md"
-        ):
+        elif r.startswith(
+            (
+                "wiki/private/_sources/knowledge/",
+                "sources/knowledge/web/",
+                "private/knowledge/",
+            )
+        ) and r not in {
+            "wiki/private/_sources/knowledge/README.md",
+            "sources/knowledge/web/README.md",
+            "private/knowledge/README.md",
+        }:
             if fm.get("type") != "Source":
                 issues["source_policy_violations"].append(f"{r}: type must be Source")
             if fm.get("publish") is not False or fm.get("access") != "local-only":
@@ -2501,7 +2409,10 @@ def main() -> int:
 
     title_index: dict[str, list[Path]] = {}
     for path, fm in metadata.items():
-        if is_noncanonical_map_archive(path):
+        if is_noncanonical_map_archive(path) or fm.get("woon_projection") in (
+            "apple-calendar",
+            "apple-calendar-dashboard",
+        ):
             continue
         r = rel(path)
         title = fm.get("title")
@@ -2533,6 +2444,8 @@ def main() -> int:
 
     content_hashes: dict[str, list[str]] = {}
     for path, text in texts.items():
+        if metadata[path].get("woon_projection") in ("apple-calendar", "apple-calendar-dashboard"):
+            continue
         r = rel(path)
         body = text
         if body.startswith("---\n"):
@@ -2593,7 +2506,8 @@ def main() -> int:
                     and fm.get("access") == "public"
                     and (
                         target_fm.get("access") != "public"
-                        or target_rel.startswith(("wiki/private/_sources/knowledge/", "inbox/"))
+                        or is_raw_source_path(match)
+                        or target_rel.startswith("inbox/")
                     )
                 ):
                     issues["published_links_to_local_only"].append(f"{r} -> {target_rel}")
