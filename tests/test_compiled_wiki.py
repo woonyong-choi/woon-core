@@ -2127,29 +2127,63 @@ def test_audit_preserves_shared_compiler_sources_but_rejects_manual_collision(
     tmp_path: Path,
 ) -> None:
     compiler, service, _, source_id, page_ids, _ = shared_nonrendered_provenance_fixture(tmp_path)
-    pages_path = tmp_path / "catalog/llm-wiki/pages.yaml"
-    pages = yaml.safe_load(pages_path.read_text())
-    for page_spec in pages["pages"]:
+    sources, claims, pages, curations, _ = compiler._load_inputs()
+    for page_spec in pages.values():
         page_spec["frontmatter"]["source_ids"] = [source_id]
-    pages_path.write_text(yaml.safe_dump(pages, allow_unicode=True, sort_keys=False))
+    toc_page_id = "ai/contents"
+    pages[toc_page_id] = {
+        "page_id": toc_page_id,
+        "output_path": f"{toc_page_id}.md",
+        "title": "Contents",
+        "frontmatter": {
+            "canonical_id": toc_page_id,
+            "title": "Contents",
+            "summary": "Source-free navigation shell.",
+            "content_state": "toc-only",
+            "source_ids": [],
+        },
+        "source_ids": [],
+        "claim_ids": [],
+        "render": {"kind": "toc-only"},
+    }
+    curations[toc_page_id] = {
+        "page_id": toc_page_id,
+        "current_use": "Navigate the compiled pages.",
+        "basis": "manual-review",
+        "status": "confirmed",
+    }
+    compiler._write_inputs(sources, claims, pages, curations)
     compiler.compile(force=True)
-    assert not any("source_id " in error for error in service.audit())
+    assert compiler.audit().complete
+    assert {(page_id, f"wiki/{page_id}.md", source_id) for page_id in page_ids} <= (
+        compiler.source_bindings()
+    )
+    assert not any("source_id" in error for error in service.audit())
 
     page = service.get(page_ids[0])
     path = tmp_path / page.relative_path
-    original = path.read_text()
-    path.write_text(original.replace("source_ids:\n", f"source_ids:\n- {source_id}\n", 1))
-    assert not any("source_id " in error for error in service.audit())
-    path.write_text(original)
+    original = path.read_text(encoding="utf-8")
+    path.write_text(
+        original.replace("source_ids:\n", f"source_ids:\n- {source_id}\n", 1), encoding="utf-8"
+    )
+    assert not any("source_id" in error for error in service.audit())
+    path.write_text(original, encoding="utf-8")
 
     manual = tmp_path / "wiki/manual.md"
     manual.write_text(
         "---\ncanonical_id: manual\ntitle: Manual source collision\n"
         "summary: A separate archive record.\npurpose: Check source ownership.\n"
-        f"source_ids:\n- {source_id}\n---\n\n# Manual source collision\n\nBody.\n"
+        f"source_ids:\n- {source_id}\n---\n\n# Manual source collision\n\nBody.\n",
+        encoding="utf-8",
     )
     assert any("source_id " in error and "also used by" in error for error in service.audit())
     assert compiler.audit().complete
+
+    pages[toc_page_id]["render"] = {"kind": "claims"}
+    compiler._write_inputs(sources, claims, pages, curations)
+    with pytest.raises(WoonError, match="page source_ids must be a non-empty string list"):
+        compiler.source_bindings()
+    assert not compiler.audit().complete
 
 
 def test_rebase_nonrendered_shared_source_provenance_replaces_every_page_claim(

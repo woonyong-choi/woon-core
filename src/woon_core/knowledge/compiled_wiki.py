@@ -781,6 +781,7 @@ class CompiledWiki:
                 source_id,
             )
             for page_id, page in pages.items()
+            if not _is_explicit_source_free_toc_page(page)
             for source_id in _string_list(page.get("source_ids"), "page source_ids")
         )
 
