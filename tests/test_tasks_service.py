@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -21,6 +22,7 @@ def _service(tmp_path: Path) -> TaskService:
 
 def test_materializes_daily_routine_once_and_preserves_user_content(tmp_path: Path) -> None:
     service = _service(tmp_path)
+    today = datetime.now(ZoneInfo("Asia/Seoul")).date()
     created = service.upsert_recurring_todo(
         task_id="health-morning-run",
         title="아침에 러닝하기",
@@ -29,18 +31,18 @@ def test_materializes_daily_routine_once_and_preserves_user_content(tmp_path: Pa
         start_date=date(2026, 8, 17),
     )
 
-    first = service.materialize_due(on_date=date(2026, 8, 17))
+    first = service.materialize_due(on_date=today)
     daily_path = tmp_path / first.daily_relative_path
     existing = daily_path.read_text(encoding="utf-8")
     daily_path.write_text(existing + "\n사용자 메모\n", encoding="utf-8")
-    replay = service.materialize_due(on_date=date(2026, 8, 17))
+    replay = service.materialize_due(on_date=today)
 
     content = daily_path.read_text(encoding="utf-8")
     assert created.created is True
     assert first.created_daily_note is True
     assert replay.created_daily_note is False
     assert replay.changed_daily_note is False
-    assert "- [ ] 아침에 러닝하기 <!-- woon-task:health-morning-run:2026-08-17 -->" in content
+    assert f"- [ ] 아침에 러닝하기 <!-- woon-task:health-morning-run:{today} -->" in content
     assert "사용자 메모" in content
     assert (tmp_path / created.routine.relative_path).is_file()
     assert (tmp_path / ".local/woon-knowledge/tasks-state.json").stat().st_mode & 0o777 == 0o600
@@ -133,3 +135,50 @@ def test_goal_condition_stops_a_daily_routine_after_user_confirmed_metric(tmp_pa
     assert 'goal_id: "health-95kg"' in (tmp_path / routine.relative_path).read_text(
         encoding="utf-8"
     )
+
+
+def test_missing_history_is_not_created_and_explicit_completion_is_retained(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    service.upsert_recurring_todo(
+        task_id="routine-one",
+        title="실제 행동",
+        purpose="실제 행동을 기록한다.",
+        area="life",
+        start_date=date(2026, 1, 1),
+    )
+    for _ in range(2):
+        result = service.materialize_due(on_date=date(2026, 8, 22))
+        assert not result.created_daily_note
+        assert not (tmp_path / result.daily_relative_path).exists()
+    completed = service.complete(task_id="routine-one", on_date=date(2026, 8, 22))
+    note = tmp_path / completed.daily_relative_path
+    before = note.read_bytes()
+    service.materialize_due(on_date=date(2026, 8, 22))
+    assert note.read_bytes() == before
+    assert "- [x] 실제 행동" in note.read_text()
+
+
+def test_stopped_routine_cleans_today_but_keeps_completed_and_manual_text(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+    routine = service.upsert_recurring_todo(
+        task_id="routine-one",
+        title="예정된 행동",
+        purpose="할 행동",
+        area="life",
+    ).routine
+    result = service.materialize_due(on_date=today)
+    note = tmp_path / result.daily_relative_path
+    note.write_text(
+        note.read_text().replace(
+            "<!-- woon-tasks:end -->",
+            f"- [x] 완료 기록 <!-- woon-task:completed-one:{today} -->\n<!-- woon-tasks:end -->",
+        )
+        + "\n사용자 자유 메모\n"
+    )
+    routine_path = tmp_path / routine.relative_path
+    routine_path.write_text(routine_path.read_text().replace("status: active", "status: paused"))
+    service.materialize_due(on_date=today)
+    assert "예정된 행동" not in note.read_text()
+    assert "- [x] 완료 기록" in note.read_text()
+    assert "사용자 자유 메모" in note.read_text()

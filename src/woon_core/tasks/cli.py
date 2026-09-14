@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 from typing import TextIO
@@ -15,12 +16,38 @@ def run_tasks(arguments: list[str], output: TextIO) -> None:
 
     if not arguments:
         raise WoonError(
-            "usage: woon tasks <find|upsert-goal|upsert-recurring|materialize|complete>"
+            "usage: woon tasks <find|upsert-goal|upsert-recurring|materialize|complete|"
+            "preview-deletion|delete-recurring>"
         )
     command, *options = arguments
     values, positionals = _options(options)
     vault = Path(values.pop("--vault")).expanduser() if "--vault" in values else None
     service = build_task_service(vault)
+    if command == "preview-deletion":
+        if positionals or set(values) != {"--ids"}:
+            raise WoonError("tasks preview-deletion requires --ids (comma-separated exact IDs)")
+        result = service.preview_recurring_deletion(tuple(values["--ids"].split(",")))
+        output.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+        return
+    if command == "delete-recurring":
+        if positionals or set(values) != {"--request"}:
+            raise WoonError("tasks delete-recurring requires --request JSON")
+        request = json.loads(Path(values["--request"]).read_text(encoding="utf-8"))
+        if not isinstance(request, dict) or set(request) != {
+            "task_ids",
+            "expected_revisions",
+            "empty_daily_paths",
+            "review_reference",
+        }:
+            raise WoonError("routine deletion request requires exact IDs, revisions and review")
+        result = service.delete_recurring_todos(
+            task_ids=tuple(request["task_ids"]),
+            expected_revisions=request["expected_revisions"],
+            empty_daily_paths=tuple(request["empty_daily_paths"]),
+            review_reference=request["review_reference"],
+        )
+        output.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+        return
     if command == "find":
         if len(positionals) != 1 or set(values).difference({"--date"}):
             raise WoonError("tasks find requires one query and optional --date")

@@ -3186,6 +3186,7 @@ name = "woon-core"
 version = "0.5.6"
 source = { editable = "." }
 dependencies = [
+    { name = "markdown-it-py" },
     { name = "mcp" },
     { name = "pdfplumber" },
     { name = "pypdf" },
@@ -3210,6 +3211,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "docling", extras = ["rapidocr"], marker = "extra == 'documents'", specifier = "==2.117.0" },
+    { name = "markdown-it-py", specifier = ">=4,<5" },
     { name = "mcp", specifier = ">=1.27,<2" },
     { name = "ocrmac", marker = "sys_platform == 'darwin' and extra == 'documents'", specifier = "==1.0.1" },
     { name = "pdfplumber", specifier = ">=0.11.9,<0.12" },

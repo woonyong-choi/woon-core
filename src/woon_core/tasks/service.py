@@ -217,7 +217,15 @@ class TaskService:
             return TaskGoalWriteResult(created=existing is None, changed=changed, goal=goal)
 
     def materialize_due(self, *, on_date: date | None = None) -> DailyMaterializationResult:
-        """Create one KST daily note and synchronize its tool-owned task block."""
+        """Project today's actions; do not manufacture empty history on other dates."""
+        return self._materialize_due(on_date=on_date)
+
+    def _materialize_due(
+        self,
+        *,
+        on_date: date | None = None,
+        completion_id: str | None = None,
+    ) -> DailyMaterializationResult:
 
         target_day = on_date or datetime.now(_KST).date()
         goals = {goal.goal_id: goal for goal in self.list_goals()}
@@ -231,6 +239,23 @@ class TaskService:
         )
         daily_path = self._daily_root / f"{target_day.isoformat()}.md"
         with exclusive_file_lock(self._state_path.with_suffix(".lock")):
+            if completion_id is not None and completion_id not in {r.task_id for r in routines}:
+                raise WoonError("task is not due for this day")
+            if completion_id is None and (
+                (not routines and not daily_path.exists())
+                or target_day != datetime.now(_KST).date()
+            ):
+                existing = daily_path.read_text(encoding="utf-8") if daily_path.is_file() else ""
+                completed = _completed_task_ids(existing, target_day)
+                return DailyMaterializationResult(
+                    day=target_day.isoformat(),
+                    created_daily_note=False,
+                    changed_daily_note=False,
+                    tasks=tuple(
+                        DailyTask(r.task_id, r.title, r.task_id in completed) for r in routines
+                    ),
+                    daily_relative_path=_relative(daily_path, self._vault),
+                )
             created_daily_note = not daily_path.exists()
             if created_daily_note:
                 template = _render_daily_template(self._template_path, target_day)
@@ -241,10 +266,25 @@ class TaskService:
                 DailyTask(
                     task_id=routine.task_id,
                     title=routine.title,
-                    completed=routine.task_id in completed,
+                    completed=routine.task_id in completed or routine.task_id == completion_id,
                 )
                 for routine in routines
             )
+            # Completed observations remain history even after a routine or
+            # goal stops. Only obsolete unchecked generated rows disappear.
+            retained = []
+            current_ids = {task.task_id for task in tasks}
+            for line in existing.splitlines():
+                match = _MARKER.match(line)
+                if (
+                    match
+                    and match.group(1).casefold() == "x"
+                    and match.group(3) == target_day.isoformat()
+                    and match.group(2) not in current_ids
+                ):
+                    title = line.split("] ", 1)[1].split("<!-- woon-task:", 1)[0].strip()
+                    retained.append(DailyTask(match.group(2), title, True))
+            tasks += tuple(retained)
             updated = _replace_managed_tasks(existing, tasks, target_day)
             changed_daily_note = updated != existing
             if changed_daily_note:
@@ -269,39 +309,7 @@ class TaskService:
         """Mark one materialized task complete without touching other daily content."""
 
         _validate_task_id(task_id)
-        target_day = on_date or datetime.now(_KST).date()
-        result = self.materialize_due(on_date=target_day)
-        daily_path = self._daily_root / f"{target_day.isoformat()}.md"
-        with exclusive_file_lock(self._state_path.with_suffix(".lock")):
-            existing = daily_path.read_text(encoding="utf-8")
-            marker = f"<!-- woon-task:{task_id}:{target_day.isoformat()} -->"
-            replaced = re.sub(
-                rf"^- \[ \](.*{re.escape(marker)})$",
-                r"- [x]\1",
-                existing,
-                flags=re.MULTILINE,
-            )
-            if replaced == existing:
-                if marker not in existing:
-                    raise WoonError("task is not materialized for this day")
-                return result
-            atomic_write(daily_path, replaced.encode("utf-8"))
-            _record_operation(
-                self._state_path,
-                operation=f"complete:{task_id}:{target_day.isoformat()}",
-                payload={"daily_path": _relative(daily_path, self._vault)},
-            )
-        completed_tasks = tuple(
-            DailyTask(task.task_id, task.title, task.completed or task.task_id == task_id)
-            for task in result.tasks
-        )
-        return DailyMaterializationResult(
-            day=result.day,
-            created_daily_note=result.created_daily_note,
-            changed_daily_note=True,
-            tasks=completed_tasks,
-            daily_relative_path=result.daily_relative_path,
-        )
+        return self._materialize_due(on_date=on_date, completion_id=task_id)
 
     def list_routines(self) -> tuple[TaskRoutine, ...]:
         if not self._routines_root.exists():
@@ -309,6 +317,132 @@ class TaskService:
         return tuple(
             _read_routine(path, self._vault) for path in sorted(self._routines_root.glob("*.md"))
         )
+
+    def preview_recurring_deletion(self, task_ids: tuple[str, ...]) -> dict[str, object]:
+        """Inspect exact routines and their managed rows; never infer deletion from a title."""
+        changes, rows, completed = _recurring_deletion_changes(self._vault, task_ids)
+        return {
+            "task_ids": list(task_ids),
+            "expected_revisions": {
+                relative: _file_revision(self._vault / relative) for relative in changes
+            },
+            "empty_daily_paths": [
+                relative
+                for relative, content in changes.items()
+                if content is not None and _empty_daily_body(content.decode())
+            ],
+            "managed_rows": rows,
+            "completed_rows": completed,
+        }
+
+    def delete_recurring_todos(
+        self,
+        *,
+        task_ids: tuple[str, ...],
+        expected_revisions: dict[str, str | None],
+        empty_daily_paths: tuple[str, ...],
+        review_reference: str,
+    ) -> dict[str, object]:
+        """Delete reviewed routine IDs and all their owned rows, including completion.
+
+        The exact file revisions and explicitly reviewed empty dates are required.
+        A pending receipt pins before/after hashes for safe retry after interruption;
+        changed personal text fails closed. Goals and other writers remain untouched.
+        """
+        if not review_reference.strip() or len(review_reference) > 500:
+            raise WoonError("routine deletion requires a bounded review reference")
+        key = "routine-delete:" + hashlib.sha256(encode_json(sorted(task_ids))).hexdigest()[:24]
+        request_hash = hashlib.sha256(
+            encode_json(
+                {
+                    "task_ids": sorted(task_ids),
+                    "expected_revisions": expected_revisions,
+                    "empty_daily_paths": sorted(empty_daily_paths),
+                    "review_reference": review_reference,
+                }
+            )
+        ).hexdigest()
+        with exclusive_file_lock(self._state_path.with_suffix(".lock")):
+            state = _load_state(self._state_path)
+            operations = state["operations"]
+            assert isinstance(operations, dict)
+            previous = operations.get(key)
+            if previous is not None and previous.get("request_sha256") != request_hash:
+                raise WoonError("routine deletion has another request; inspect its receipt")
+            changes, rows, completed = _recurring_deletion_changes(self._vault, task_ids)
+            if previous is None:
+                if set(changes) != set(expected_revisions):
+                    raise WoonError("routine deletion file set changed; preview it again")
+                if not set(empty_daily_paths).issubset(changes):
+                    raise WoonError("empty daily deletion must be in the reviewed file set")
+                for relative, expected in expected_revisions.items():
+                    if _file_revision(self._vault / relative) != expected:
+                        raise WoonError(f"routine deletion revision changed: {relative}")
+                for relative in empty_daily_paths:
+                    content = changes[relative]
+                    if content is None or not _empty_daily_body(content.decode()):
+                        raise WoonError(f"daily note still has personal content: {relative}")
+                    changes[relative] = None
+                previous = {
+                    "status": "pending",
+                    "request_sha256": request_hash,
+                    "task_ids": list(task_ids),
+                    "review_reference": review_reference,
+                    "managed_rows": rows,
+                    "completed_rows": completed,
+                    "files": {
+                        relative: {
+                            "before": expected_revisions[relative],
+                            "after": hashlib.sha256(content).hexdigest()
+                            if content is not None
+                            else None,
+                        }
+                        for relative, content in changes.items()
+                    },
+                }
+            files = previous["files"]
+            if not set(changes).issubset(files):
+                raise WoonError("routine deletion found new managed rows; inspect before retry")
+            for relative, hashes in files.items():
+                current = _file_revision(self._vault / relative)
+                if current not in (hashes["before"], hashes["after"]):
+                    raise WoonError(f"routine deletion revision changed: {relative}")
+            if previous["status"] == "complete":
+                if any(_file_revision(self._vault / p) != h["after"] for p, h in files.items()):
+                    raise WoonError("completed routine deletion changed; inspect before retry")
+                return previous
+            operations[key] = previous
+            atomic_write(self._state_path, encode_json(state), mode=0o600)
+            for relative, hashes in files.items():
+                path = self._vault / relative
+                current = _file_revision(path)
+                if current == hashes["after"]:
+                    continue
+                if current != hashes["before"]:
+                    raise WoonError(f"routine deletion revision changed: {relative}")
+                content = None if relative in empty_daily_paths else changes.get(relative)
+                after = hashlib.sha256(content).hexdigest() if content is not None else None
+                if after != hashes["after"]:
+                    raise WoonError("routine deletion retry output changed")
+                if content is None:
+                    path.unlink()
+                else:
+                    atomic_write(path, content)
+            if any(_file_revision(self._vault / p) != h["after"] for p, h in files.items()):
+                raise WoonError("routine deletion could not verify every result")
+            # Keep one deletion receipt, not the obsolete materialization history.
+            for operation, payload in tuple(operations.items()):
+                if operation in {f"upsert:{task_id}" for task_id in task_ids}:
+                    del operations[operation]
+                elif operation.startswith("materialize:") and "task_ids" in payload:
+                    remaining = [item for item in payload["task_ids"] if item not in task_ids]
+                    if remaining:
+                        payload["task_ids"] = remaining
+                    else:
+                        del operations[operation]
+            previous["status"] = "complete"
+            atomic_write(self._state_path, encode_json(state), mode=0o600)
+            return previous
 
     def list_goals(self) -> tuple[TaskGoal, ...]:
         if not self._goals_root.exists():
@@ -333,6 +467,81 @@ class TaskService:
             for routine in self.list_routines()
             if needle in routine.title.casefold() or needle in routine.purpose.casefold()
         )
+
+
+def _file_revision(path: Path) -> str | None:
+    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
+        raise WoonError("routine deletion does not follow symlinks")
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise WoonError("routine deletion target is not a file")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _empty_daily_body(text: str) -> bool:
+    parts = text.split("---", 2)
+    if len(parts) != 3:
+        return False
+    body = re.sub(r"^# \d{4}-\d{2}-\d{2}\s*$", "", parts[2], flags=re.MULTILINE)
+    body = re.sub(r"<!-- woon-(?:tasks|codex-digest):(?:start|end) -->", "", body)
+    return not body.strip()
+
+
+def _recurring_deletion_changes(
+    vault: Path,
+    task_ids: tuple[str, ...],
+) -> tuple[dict[str, bytes | None], int, int]:
+    if not task_ids or len(task_ids) > 16 or len(set(task_ids)) != len(task_ids):
+        raise WoonError("routine deletion requires 1-16 distinct task IDs")
+    changes: dict[str, bytes | None] = {}
+    for task_id in task_ids:
+        _validate_task_id(task_id)
+        relative = f"inbox/tasks/routines/{task_id}.md"
+        path = vault / relative
+        if _file_revision(path) is not None and _read_routine(path, vault).task_id != task_id:
+            raise WoonError("routine deletion ID does not match its file")
+        changes[relative] = None
+    rows = completed = 0
+    for path in sorted((vault / "inbox/daily").glob("????-??-??.md")):
+        _file_revision(path)
+        text = path.read_text(encoding="utf-8")
+        selected = [
+            match
+            for line in text.splitlines()
+            if (match := _MARKER.match(line)) and match.group(2) in task_ids
+        ]
+        if not selected:
+            continue
+        if text.count(_START) != 1 or text.count(_END) != 1:
+            raise WoonError("routine deletion needs one complete managed task block")
+        before, tail = text.split(_START, 1)
+        block, after = tail.split(_END, 1)
+        retained: list[str] = []
+        removed = 0
+        for line in block.splitlines(keepends=True):
+            match = _MARKER.match(line.rstrip("\r\n"))
+            if match and match.group(2) in task_ids:
+                if match.group(3) != path.stem:
+                    raise WoonError("routine deletion row date does not match its daily note")
+                removed += 1
+                completed += match.group(1).casefold() == "x"
+            else:
+                retained.append(line)
+        if removed != len(selected):
+            raise WoonError("routine deletion found a selected row outside its owned block")
+        rows += removed
+        remaining = "".join(retained)
+        replacement = _START + remaining + _END if remaining.strip() else ""
+        updated = before + replacement + after
+        updated = re.sub(
+            r"\n## (?:오늘의 할 일|자유 메모)[ \t]*\n[ \t\r\n]*"
+            r"(?=<!-- woon-codex-digest:start -->|## |\Z)",
+            "\n",
+            updated,
+        )
+        changes[path.relative_to(vault).as_posix()] = updated.encode("utf-8")
+    return changes, rows, completed
 
 
 def _read_routine(path: Path, vault: Path) -> TaskRoutine:
@@ -632,6 +841,8 @@ def _completed_task_ids(text: str, target_day: date) -> set[str]:
 
 
 def _replace_managed_tasks(text: str, tasks: tuple[DailyTask, ...], target_day: date) -> str:
+    if not tasks and _START not in text and _END not in text:
+        return text
     lines = [
         _START,
         *[

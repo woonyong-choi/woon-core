@@ -139,12 +139,12 @@ def test_failed_eventkit_requery_leaves_the_operation_pending_without_a_receipt(
 ) -> None:
     class VerificationFailureCalendar(FakeCalendarPort):
         def verify_applied(self, candidate: ScheduleCandidate, event_id: str) -> None:
-            raise WoonError("simulated EventKit requery failure")
+            raise WoonError("simulated provider requery failure")
 
     state_path = tmp_path / "schedule-state.json"
     calendar = VerificationFailureCalendar()
 
-    with pytest.raises(WoonError, match="simulated EventKit requery failure"):
+    with pytest.raises(WoonError, match="simulated provider requery failure"):
         ScheduleBridge(calendar, state_path=state_path).apply(_candidate())
 
     restarted = ScheduleBridge(FakeCalendarPort(), state_path=state_path)

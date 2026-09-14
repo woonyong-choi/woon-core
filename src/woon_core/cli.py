@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from woon_core import __version__
-from woon_core.calendar.cli import run_calendar
 from woon_core.career.cli import run_career
 from woon_core.context import Compiler
 from woon_core.environment import apply as apply_environment
@@ -111,26 +110,32 @@ from woon_core.knowledge.research_intake import (
     export_notebooklm_artifact,
     write_research_intake_plan,
 )
-from woon_core.knowledge.schedule_apply import (
-    apply_policy_authorized_schedule_candidate,
-    receipt_record,
-)
 from woon_core.knowledge.second_brain_runtime import record_governance_preflight
 from woon_core.knowledge.source_archive import archive_private_source_corpus
+from woon_core.knowledge.source_boundary import private_source_relative
 from woon_core.knowledge.source_catalog import (
     load_source_catalog,
     plan_source_catalog,
     write_source_catalog,
 )
 from woon_core.knowledge.source_restructure import (
+    apply_source_restructure,
     audit_source_catalog_references,
     prepare_source_restructure_preflight,
+    reconcile_raw_source_catalog_owners,
+    write_reconciled_source_restructure_manifest,
     write_source_catalog_reference_audit,
     write_source_restructure_template,
 )
+from woon_core.knowledge.wiki_content_quality_audit import (
+    audit_wiki_content_quality,
+    write_wiki_content_quality_audit,
+)
 from woon_core.knowledge.wiki_restructure import (
+    apply_wiki_restructure,
     prepare_wiki_restructure_preflight,
     write_wiki_restructure_classification,
+    write_wiki_restructure_inventory,
     write_wiki_restructure_template,
 )
 from woon_core.knowledge.wiki_tree import apply_wiki_tree_refresh, prepare_wiki_tree_refresh
@@ -152,7 +157,7 @@ Usage:
   woon repo sync [--root <path>]
   woon resolve <repo-id|repo://id/path> [--root <path>]
   woon context generate [--all|repo-id...] [--root <path>]
-  woon context check [--all|repo-id...] [--root <path>]
+  woon context check [--all|repo-id...] [--artifacts-only] [--root <path>]
   woon env generate [--target <macos|windows|linux>]
   woon env doctor [--all]
   woon env plan [--all]
@@ -170,6 +175,8 @@ Usage:
     --area <area> [--start-date <YYYY-MM-DD>] [--vault <path>]
   woon tasks materialize [--date <YYYY-MM-DD>] [--vault <path>]
   woon tasks complete --id <task-id> [--date <YYYY-MM-DD>] [--vault <path>]
+  woon tasks preview-deletion --ids <task-id,...> [--vault <path>]
+  woon tasks delete-recurring --request <reviewed-json-file> [--vault <path>]
   woon people find <query> [--vault <path>]
   woon people documents <person-id> [--vault <path>]
   woon people upsert --id <person-id> --title <text> --kind <kind>
@@ -180,35 +187,49 @@ Usage:
   woon people identify --person <person-id> --identifiers <comma-separated-identifiers>
     --evidence <text> [--context <comma-separated-terms>] [--vault <path>]
   woon people private-history-sync --novel-root <local-path> [--vault <path>]
-  woon calendar refresh [--vault <path>]
-  woon calendar migrate-legacy [--vault <path>]
-  woon calendar upsert --id <stable-id> --title <text> --start <ISO8601>
-    --end <ISO8601> --category <career|learning|creative|life|relationship|health|admin>
-    [--location <text>] [--notes <text>] [--vault <path>]
   woon career <create|analyze|evaluate|approve-draft|attach-pdf|mark-reviewed|
     mark-ready|reopen|outcome|context|show> [options]
   woon knowledge index [--vault <path>]
   woon knowledge search <query> [--limit <1..20>] [--vault <path>]
   woon knowledge get <canonical-id> [--vault <path>]
   woon knowledge audit [--vault <path>]
+  woon knowledge configure-navigation --vault <path> [--graph-colors] [--apply]
+  woon knowledge configure-navigation --vault <path> --runtime-reload
+    --obsidian-cli <absolute-path> --vault-name <name> [--apply --expected-state <digest>]
+  woon knowledge configure-navigation --vault <path> --runtime-reconnect
+    --obsidian-cli <absolute-path> --vault-name <name> --expected-attempt <digest>
   woon knowledge vault-tool <name> [tool-options...] [--vault <path>]
   woon knowledge obsidian-plugin <status|install|remove-detected-mindmaps|
     install-local-build|
-    configure-prisma-calendar|configure-full-calendar-remastered|
-    configure-notion-bases-calendar|configure-link-calendar|
+    retire-apple-calendar-source|configure-google-two-way-source|disable-runnable-remote-execution|
+    runnable-companion-status|start-runnable-companion|stop-runnable-companion|pair-runnable-companion|
+    recover-runnable-companion-orphan|
     attest-link-calendar-runtime|retire>
     [--plugin <approved-plugin-id>...] [--source-dir <path>] [--version <semver>]
     [--attested-check <operator-confirmed-ui-check>...]
+    [--apply --expected-settings-sha256 <preview-before-sha256>]
+    [--companion-cli <artifact> --node-cli <node> --docker-cli <docker>]
+    [--obsidian-cli <cli> --vault-name <running-vault>] [--apply --expected-state <preview-hash>]
+    [--pid <exact-orphan-pid>]
     [--vault <path>]
   woon knowledge history <canonical-id> [--limit <1..100>] [--vault <path>]
+  woon knowledge workflow <run|status|cancel|undo|mcp> [--vault <path>]
+    [--request <JSON-file|->] [--job <job-id>]
   woon knowledge migrate-compiled [--vault <path>]
   woon knowledge initialize-curation [--vault <path>]
   woon knowledge refresh-provisional-curation [--vault <path>]
   woon knowledge reconcile-superseded-revisions [--vault <path>]
+  woon knowledge retire-nonrendered-provenance --page <canonical-id> --source <source-id>
+    [--vault <path>]
+  woon knowledge curate-current-provenance --page <canonical-id> --body-file <local-Markdown>
+    [--vault <path>]
+  woon knowledge rebase-nonrendered-shared-provenance --source <source-id>
+    --body-file <local-Markdown> [--vault <path>]
+  woon knowledge relocate-current-source-locators --replace <old-prefix>=<new-prefix>
+    [--replace <old-prefix>=<new-prefix>...] [--vault <path>]
   woon knowledge compile [--force] [--page <canonical-id>...] [--vault <path>]
   woon knowledge compile-audit [--vault <path>]
   woon knowledge apply-compiled-transaction --input <local-JSON> [--vault <path>]
-  woon knowledge public-projection --site <path> [--apply] [--vault <path>]
   woon knowledge book-coverage-audit [--vault <path>]
   woon knowledge book-intake-audit [--manifest <name>] [--vault <path>]
   woon knowledge book-promote --input <local-JSON> [--vault <path>]
@@ -220,12 +241,20 @@ Usage:
     --next-question <text> --recorded-on <YYYY-MM-DD> --expected-revision <sha256>
     [--vault <path>]
   woon knowledge refresh-wiki-tree [--vault <path>]
+  woon knowledge restructure-apply --manifest <local-path> [--vault <path>]
   woon knowledge restructure-preflight --manifest <path> [--vault <path>]
   woon knowledge restructure-template --output <local-path> [--vault <path>]
   woon knowledge restructure-classify --output <local-path> [--vault <path>]
+  woon knowledge restructure-inventory --output <local-path> [--vault <path>]
+  woon knowledge content-quality-audit --output <local-path> [--vault <path>]
   woon knowledge source-restructure-template --output <local-path> [--vault <path>]
   woon knowledge source-restructure-preflight --manifest <path> [--vault <path>]
   woon knowledge source-restructure-catalog-audit --output <local-path> [--vault <path>]
+  woon knowledge source-restructure-reconcile-owners [--vault <path>]
+  woon knowledge source-restructure-reconcile-manifest --manifest <local-path> --output <local-path>
+    [--vault <path>]
+  woon knowledge source-restructure-apply --manifest <local-path> [--vault <path>]
+  woon knowledge public-projection --site <path> [--apply] [--vault <path>]
   woon knowledge project-novel [--day <YYYY-MM-DD>] [--vault <path>]
   woon knowledge evaluate --cases <path> [--output <path>] [--vault <path>]
   woon knowledge evaluate-answers --cases <path> --answers <path>
@@ -290,7 +319,6 @@ Usage:
   woon knowledge record-codex-source --bundle-file <local-JSON> [--vault <path>]
   woon knowledge materialize-codex-daily-record --day <YYYY-MM-DD> [--vault <path>]
   woon knowledge migrate-legacy-daily-digests [--vault <path>]
-  woon knowledge schedule-apply --candidate <local-JSON>
     [--vault <path>]
   woon version
 """
@@ -358,7 +386,7 @@ def run(raw_arguments: list[str], output: TextIO) -> None:
         if len(remaining) != 1:
             raise WoonError("resolve requires one repository ID or repo URI")
         workspace, registry = _load(root)
-        print(registry.resolve(workspace.root, remaining[0]), file=output)
+        print(registry.resolve(workspace.root, remaining[0], must_exist=True), file=output)
     elif command == "repo":
         if remaining != ["sync"]:
             raise WoonError("usage: woon repo sync")
@@ -375,8 +403,6 @@ def run(raw_arguments: list[str], output: TextIO) -> None:
         run_tasks(remaining, output)
     elif command == "people":
         run_people(remaining, output)
-    elif command == "calendar":
-        run_calendar(remaining, output)
     elif command == "career":
         run_career(remaining, output)
     elif command == "knowledge":
@@ -389,6 +415,11 @@ def _run_context(root: str, arguments: list[str], output: TextIO) -> None:
     if not arguments:
         raise WoonError("usage: woon context <generate|check> [--all|repo-id]")
     command, *targets = arguments
+    artifacts_only = "--artifacts-only" in targets
+    if artifacts_only:
+        if command != "check" or targets.count("--artifacts-only") != 1:
+            raise WoonError("--artifacts-only is supported once for context check")
+        targets.remove("--artifacts-only")
     all_repositories = not targets or targets == ["--all"]
     identifiers = [] if all_repositories else targets
     if any(identifier.startswith("-") for identifier in identifiers):
@@ -398,10 +429,16 @@ def _run_context(root: str, arguments: list[str], output: TextIO) -> None:
     if command == "generate":
         result = compiler.generate(all_repositories, identifiers)
     elif command == "check":
-        result = compiler.check(all_repositories, identifiers)
+        result = compiler.check(all_repositories, identifiers, artifacts_only=artifacts_only)
     else:
         raise WoonError(f"unknown context command {command!r}")
-    suffix = "\npath_violations: 0" if command == "check" else ""
+    suffix = (
+        "\nscope: generated-instructions\npath_audit: not-run"
+        if artifacts_only
+        else "\npath_violations: 0"
+        if command == "check"
+        else ""
+    )
     print(
         f"status: ok\nrepositories: {result.repositories}\nartifacts: {result.artifacts}{suffix}",
         file=output,
@@ -412,6 +449,16 @@ def _run_environment(root: str, arguments: list[str], output: TextIO) -> None:
     if not arguments:
         raise WoonError("usage: woon env <doctor|plan|generate|check|apply|verify> [--all]")
     command, *raw_options = arguments
+    if command == "repair-codex-hooks":
+        from woon_core.environment.codex_hooks import repair_missing_orca_hooks
+
+        if raw_options not in ([], ["--apply"]):
+            raise WoonError("repair-codex-hooks accepts only --apply")
+        result = repair_missing_orca_hooks(
+            _default_codex_automation_root().parent, apply=bool(raw_options)
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+        return
     if command == "python-ide":
         _run_python_ide(root, raw_options, output)
         return
@@ -596,6 +643,16 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if not arguments:
         raise WoonError("usage: woon knowledge <index|search|get|audit|history|compile|evaluate>")
     command, *raw_options = arguments
+    if command == "workflow":
+        from woon_core.knowledge.workflow_cli import run_workflow_command
+
+        run_workflow_command(raw_options, output)
+        return
+    if command == "intake":
+        from woon_core.knowledge.intake_cli import run_intake_command
+
+        run_intake_command(raw_options, output)
+        return
     if command == "vault-tool":
         _run_vault_tool(raw_options, output)
         return
@@ -635,11 +692,20 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if command == "restructure-preflight":
         _run_wiki_restructure_preflight(raw_options, output)
         return
+    if command == "restructure-apply":
+        _run_wiki_restructure_apply(raw_options, output)
+        return
     if command == "restructure-template":
         _run_wiki_restructure_template(raw_options, output)
         return
     if command == "restructure-classify":
         _run_wiki_restructure_classification(raw_options, output)
+        return
+    if command == "restructure-inventory":
+        _run_wiki_restructure_inventory(raw_options, output)
+        return
+    if command == "content-quality-audit":
+        _run_wiki_content_quality_audit(raw_options, output)
         return
     if command == "source-restructure-template":
         _run_source_restructure_template(raw_options, output)
@@ -649,6 +715,15 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         return
     if command == "source-restructure-catalog-audit":
         _run_source_restructure_catalog_audit(raw_options, output)
+        return
+    if command == "source-restructure-reconcile-owners":
+        _run_source_restructure_owner_reconciliation(raw_options, output)
+        return
+    if command == "source-restructure-reconcile-manifest":
+        _run_source_restructure_manifest_reconciliation(raw_options, output)
+        return
+    if command == "source-restructure-apply":
+        _run_source_restructure_apply(raw_options, output)
         return
     if command == "public-projection":
         _run_public_projection(raw_options, output)
@@ -679,6 +754,10 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         "initialize-curation",
         "refresh-provisional-curation",
         "reconcile-superseded-revisions",
+        "retire-nonrendered-provenance",
+        "curate-current-provenance",
+        "rebase-nonrendered-shared-provenance",
+        "relocate-current-source-locators",
         "compile",
         "compile-audit",
     }:
@@ -726,6 +805,108 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if command == "governance-preflight":
         _run_governance_preflight(raw_options, output)
         return
+    if command == "governance-diagnose":
+        from woon_core.knowledge.workflow_health import diagnose_workflow
+
+        vault, options = _parse_knowledge_options(raw_options)
+        if options:
+            raise WoonError("governance-diagnose takes only --vault")
+        report = diagnose_workflow(
+            vault or resolve_knowledge_vault(), _default_codex_automation_root()
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2), file=output)
+        return
+    if command == "configure-navigation":
+        from woon_core.knowledge.local_settings import (
+            configure_navigation,
+            reconnect_navigation_runtime,
+            reload_navigation_runtime,
+        )
+
+        apply = "--apply" in raw_options
+        graph_colors = "--graph-colors" in raw_options
+        runtime_reload = "--runtime-reload" in raw_options
+        runtime_reconnect = "--runtime-reconnect" in raw_options
+        remaining_options = [
+            value
+            for value in raw_options
+            if value not in {"--apply", "--graph-colors", "--runtime-reload", "--runtime-reconnect"}
+        ]
+        runtime_options = {}
+        if runtime_reload or runtime_reconnect:
+            for flag in (
+                "--obsidian-cli",
+                "--vault-name",
+                "--expected-state",
+                "--expected-attempt",
+            ):
+                if flag not in remaining_options:
+                    continue
+                index = remaining_options.index(flag)
+                if index + 1 == len(remaining_options) or remaining_options[index + 1].startswith(
+                    "--"
+                ):
+                    raise WoonError(f"{flag} requires a value")
+                runtime_options[flag] = remaining_options[index + 1]
+                remaining_options = remaining_options[:index] + remaining_options[index + 2 :]
+        vault, options = _parse_knowledge_options(remaining_options)
+        if vault is None or options:
+            raise WoonError("configure-navigation requires --vault and valid options")
+        if runtime_reconnect:
+            if (
+                apply
+                or runtime_reload
+                or graph_colors
+                or "--expected-state" in runtime_options
+                or not all(
+                    flag in runtime_options
+                    for flag in ("--obsidian-cli", "--vault-name", "--expected-attempt")
+                )
+            ):
+                raise WoonError("runtime reconnect only reads and requires CLI/Vault/attempt hash")
+            report = reconnect_navigation_runtime(
+                vault,
+                obsidian_cli=Path(runtime_options["--obsidian-cli"]),
+                vault_name=runtime_options["--vault-name"],
+                expected_attempt=runtime_options["--expected-attempt"],
+            )
+        elif runtime_reload:
+            if (
+                graph_colors
+                or not all(flag in runtime_options for flag in ("--obsidian-cli", "--vault-name"))
+                or "--expected-attempt" in runtime_options
+            ):
+                raise WoonError(
+                    "runtime reload requires CLI/Vault name and a separate settings apply"
+                )
+            report = reload_navigation_runtime(
+                vault,
+                obsidian_cli=Path(runtime_options["--obsidian-cli"]),
+                vault_name=runtime_options["--vault-name"],
+                apply=apply,
+                expected_state=runtime_options.get("--expected-state"),
+            )
+        else:
+            report = configure_navigation(vault, apply=apply, graph_colors=graph_colors)
+        print(json.dumps(report, ensure_ascii=False, indent=2), file=output)
+        return
+    if command == "migrate-planned-state":
+        apply = "--apply" in raw_options
+        raw = [value for value in raw_options if value != "--apply"]
+        expected = None
+        if "--expected-catalog" in raw:
+            index = raw.index("--expected-catalog")
+            if index + 1 >= len(raw):
+                raise WoonError("--expected-catalog requires a digest")
+            expected = raw[index + 1]
+            raw = raw[:index] + raw[index + 2 :]
+        vault, options = _parse_knowledge_options(raw)
+        if vault is None or options:
+            raise WoonError("migrate-planned-state requires --vault")
+        _, service = build_knowledge_service(vault)
+        report = service.migrate_planned_states(apply=apply, expected_catalog_revision=expected)
+        print(json.dumps(report, ensure_ascii=False, indent=2), file=output)
+        return
     if command == "record-mail-schedule-candidates":
         _run_mail_schedule_candidate_recording(raw_options, output)
         return
@@ -738,14 +919,14 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if command == "record-codex-source":
         _run_codex_source_recording(raw_options, output)
         return
+    if command == "record-conversation-source":
+        _run_conversation_source_recording(raw_options, output)
+        return
     if command == "materialize-codex-daily-record":
         _run_codex_daily_digest_materialization(raw_options, output)
         return
     if command == "migrate-legacy-daily-digests":
         _run_legacy_daily_digest_migration(raw_options, output)
-        return
-    if command == "schedule-apply":
-        _run_schedule_apply(raw_options, output)
         return
     local_commands = {"index", "search", "get", "audit", "history"}
     if command not in local_commands:
@@ -880,10 +1061,17 @@ def _run_second_brain_orchestrator_validation(arguments: list[str], output: Text
     # explicit override for isolated tests and non-default CODEX_HOME setups.
     automation_root = _default_codex_automation_root()
     automation_root_seen = False
+    lane_id = None
     raw_options: list[str] = []
     index = 0
     while index < len(arguments):
         option = arguments[index]
+        if option == "--lane":
+            if lane_id is not None or index + 1 >= len(arguments):
+                raise WoonError("--lane requires exactly one automation ID")
+            lane_id = arguments[index + 1]
+            index += 2
+            continue
         if option != "--automation-root":
             raw_options.append(option)
             index += 1
@@ -897,7 +1085,11 @@ def _run_second_brain_orchestrator_validation(arguments: list[str], output: Text
     if options:
         raise WoonError("knowledge validate-orchestrator takes no positional arguments")
     settings = load_orchestrator_settings(vault or resolve_knowledge_vault())
-    verified = verify_codex_automation_registry(settings, automation_root)
+    verified = (
+        verify_codex_automation_registry(settings, automation_root)
+        if lane_id is None
+        else verify_codex_automation_registry(settings, automation_root, lane_id=lane_id)
+    )
     print(
         json.dumps(
             {
@@ -926,8 +1118,9 @@ def _run_second_brain_orchestrator_validation(arguments: list[str], output: Text
 def _run_governance_preflight(arguments: list[str], output: TextIO) -> None:
     """Run the current policy gate immediately, without waiting for a heartbeat.
 
-    The command verifies the live Codex heartbeat registry and the vault health
-    audit before it can write the governance receipt/checkpoint.  Its receipt
+    The v2 command verifies the live heartbeat registry and execution-policy
+    inventory before writing its scoped receipt/checkpoint. Legacy v1 also audits
+    Vault health; v2 diagnoses content health independently.  Its receipt
     carries digests only; it never stores the checked instruction text.
     """
 
@@ -957,6 +1150,7 @@ def _run_governance_preflight(arguments: list[str], output: TextIO) -> None:
         settings.wiki_contract,
         automation_root,
         verified,
+        include_vault_health=not all(item.contract_version == 2 for item in settings.automations),
     )
     result = record_governance_preflight(
         settings, input_sha256=input_sha256, output_sha256=output_sha256
@@ -965,7 +1159,9 @@ def _run_governance_preflight(arguments: list[str], output: TextIO) -> None:
         json.dumps(
             {
                 "status": "ok",
-                "checks": ["instruction-inventory", "automation-registry", "vault-health"],
+                "checks": ["instruction-inventory", "automation-registry"],
+                "scope": "execution-policy",
+                "content_health": "run governance-diagnose; publication still requires full audit",
                 "receipt_recorded": not result.replayed,
                 "replayed": result.replayed,
             },
@@ -982,35 +1178,43 @@ def _governance_preflight_evidence(
     wiki_contract: Path,
     automation_root: Path,
     verified: tuple[str, ...],
+    *,
+    include_vault_health: bool = True,
 ) -> tuple[str, str]:
     """Return evidence digests after bounded, non-mutating governance checks.
 
-    Any vault-health failure blocks the receipt. Legacy generated daily
-    fragments are migrated explicitly before automation is allowed to run.
+    Legacy v1 vault-health failures block the receipt. V2 records only the
+    execution-policy gate; independent diagnosis retains all content failures.
     """
 
     audit_script = Path(__file__).parent / "knowledge" / "vault_tools" / "audit-vault-health.py"
     if not audit_script.is_file():
         raise WoonError("second-brain governance health audit script is missing")
-    try:
-        audit = subprocess.run(
-            [sys.executable, str(audit_script)],
-            cwd=vault,
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-    except OSError as error:
-        raise WoonError("second-brain governance health audit could not start") from error
-    if audit.returncode != 0:
-        raise WoonError("second-brain governance health audit failed")
+    health_output = "execution-policy-only"
+    if include_vault_health:
+        try:
+            audit = subprocess.run(
+                [sys.executable, str(audit_script)],
+                cwd=vault,
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+        except OSError as error:
+            raise WoonError("second-brain governance health audit could not start") from error
+        if audit.returncode != 0:
+            raise WoonError("second-brain governance health audit failed; run governance-diagnose")
+        health_output = audit.stdout
 
     workspace = vault.parent
+    from woon_core.knowledge.workflow_health import instruction_inventory
+
     inventory: list[Path] = [
         vault / "config" / "second-brain-orchestrator.yaml",
         policy_document,
         wiki_contract,
     ]
+    inventory.extend(instruction_inventory(vault, automation_root))
     inventory.extend(sorted((vault / "docs").glob("*.md")))
     inventory.extend(
         sorted(
@@ -1039,68 +1243,28 @@ def _governance_preflight_evidence(
             text = content.decode("utf-8", errors="strict").lower()
             if any(marker in text for marker in retired_markers):
                 raise WoonError("second-brain governance found a retired instruction reference")
-        digest.update(path.name.encode("utf-8"))
+        digest.update(path.as_posix().encode("utf-8"))
         digest.update(b"\0")
         digest.update(content)
         digest.update(b"\n")
     output = hashlib.sha256()
-    output.update(audit.stdout.encode("utf-8"))
+    output.update(health_output.encode("utf-8"))
     output.update("\n".join(verified).encode("utf-8"))
     return digest.hexdigest(), output.hexdigest()
 
 
 def _active_instruction_files(repository: Path) -> tuple[Path, ...]:
-    """Return live instructions without reactivating archived source evidence."""
+    from woon_core.knowledge.workflow_health import active_instruction_files
 
-    ignored_parts = {".git", ".local", "node_modules", "archive", "_sources"}
-    candidates = (*repository.rglob("AGENTS.md"), *repository.rglob("CLAUDE.md"))
-    return tuple(
-        sorted(
-            path
-            for path in candidates
-            if not ignored_parts.intersection(path.relative_to(repository).parts)
-        )
-    )
+    return active_instruction_files(repository)
 
 
 def _governance_skill_inventory(
     workspace: Path, *, installed_root: Path | None = None
 ) -> tuple[Path, ...]:
-    """Return canonical skills and reject drift in active installed copies."""
+    from woon_core.knowledge.workflow_health import skill_inventory
 
-    repository = workspace / "woon-skills"
-    if not repository.is_dir():
-        return ()
-    catalog = repository / "catalog.json"
-    if not catalog.is_file():
-        raise WoonError("second-brain governance skill catalog is missing")
-    canonical_skills = tuple(sorted((repository / "skills").rglob("SKILL.md")))
-    if not canonical_skills:
-        raise WoonError("second-brain governance canonical skill inventory is empty")
-    canonical = tuple(
-        sorted(
-            path
-            for root in (
-                repository / "skills",
-                repository / "profiles",
-                repository / "conflicts",
-                repository / "standards",
-                repository / "evals",
-            )
-            for path in root.rglob("*")
-            if path.is_file() and path.suffix in {".json", ".md", ".py", ".sh", ".yaml", ".yml"}
-        )
-    )
-    active_root = installed_root or (Path.home() / ".codex/skills")
-    installed: list[Path] = []
-    for source in canonical_skills:
-        active = active_root / source.parent.name / "SKILL.md"
-        if not active.exists():
-            continue
-        if not active.is_file() or active.read_bytes() != source.read_bytes():
-            raise WoonError(f"second-brain governance installed skill drift: {source.parent.name}")
-        installed.append(active)
-    return (catalog, *canonical, *sorted(installed))
+    return skill_inventory(workspace, installed_root=installed_root)
 
 
 _VAULT_TOOL_SCRIPTS = {
@@ -1167,8 +1331,10 @@ def _run_obsidian_plugin(arguments: list[str], output: TextIO) -> None:
         raise WoonError(
             "knowledge obsidian-plugin requires status, install, install-local-build, "
             "remove-detected-mindmaps, "
-            "configure-prisma-calendar, configure-full-calendar-remastered, "
-            "configure-notion-bases-calendar, configure-link-calendar, "
+            "retire-apple-calendar-source, configure-google-two-way-source, "
+            "disable-runnable-remote-execution, runnable-companion-status, "
+            "start-runnable-companion, stop-runnable-companion, pair-runnable-companion, "
+            "recover-runnable-companion-orphan, "
             "attest-link-calendar-runtime, or retire"
         )
     action, *raw_options = arguments
@@ -1176,10 +1342,30 @@ def _run_obsidian_plugin(arguments: list[str], output: TextIO) -> None:
     options: list[str] = []
     local_options: dict[str, str] = {}
     attested_checks: list[str] = []
+    apply = False
     index = 0
     while index < len(raw_options):
         option = raw_options[index]
-        if option not in {"--plugin", "--source-dir", "--version", "--attested-check"}:
+        if option == "--apply":
+            if apply:
+                raise WoonError("--apply may only be provided once")
+            apply = True
+            index += 1
+            continue
+        if option not in {
+            "--plugin",
+            "--source-dir",
+            "--version",
+            "--attested-check",
+            "--expected-settings-sha256",
+            "--companion-cli",
+            "--node-cli",
+            "--docker-cli",
+            "--obsidian-cli",
+            "--vault-name",
+            "--expected-state",
+            "--pid",
+        }:
             options.append(option)
             index += 1
             continue
@@ -1199,6 +1385,23 @@ def _run_obsidian_plugin(arguments: list[str], output: TextIO) -> None:
     if remaining:
         raise WoonError("unexpected obsidian-plugin argument: " + " ".join(remaining))
     service = ObsidianPluginService(vault or resolve_knowledge_vault())
+    settings_actions = {
+        "retire-apple-calendar-source",
+        "configure-google-two-way-source",
+        "disable-runnable-remote-execution",
+    }
+    companion_actions = {
+        "start-runnable-companion",
+        "stop-runnable-companion",
+        "pair-runnable-companion",
+        "recover-runnable-companion-orphan",
+    }
+    if action not in settings_actions | companion_actions and (
+        apply or "--expected-settings-sha256" in local_options
+    ):
+        raise WoonError("preview/apply options require a registered plugin settings action")
+    if action not in companion_actions and "--expected-state" in local_options:
+        raise WoonError("--expected-state requires a registered companion action")
     if action == "status":
         if plugin_ids or local_options or attested_checks:
             raise WoonError("obsidian-plugin status does not accept install options")
@@ -1224,22 +1427,81 @@ def _run_obsidian_plugin(arguments: list[str], output: TextIO) -> None:
         if plugin_ids or local_options or attested_checks:
             raise WoonError("remove-detected-mindmaps discovers targets from installed manifests")
         result = service.remove_detected_mindmaps()
-    elif action == "configure-prisma-calendar":
+    elif action == "retire-apple-calendar-source":
+        if plugin_ids or attested_checks or set(local_options) - {"--expected-settings-sha256"}:
+            raise WoonError("retire-apple-calendar-source accepts only preview/apply options")
+        result = service.retire_apple_calendar_source(
+            apply=apply,
+            expected_settings_sha256=local_options.get("--expected-settings-sha256"),
+        )
+    elif action == "configure-google-two-way-source":
+        if plugin_ids or attested_checks or set(local_options) - {"--expected-settings-sha256"}:
+            raise WoonError("configure-google-two-way-source accepts only preview/apply options")
+        result = service.configure_google_two_way_source(
+            apply=apply,
+            expected_settings_sha256=local_options.get("--expected-settings-sha256"),
+        )
+    elif action == "disable-runnable-remote-execution":
+        if plugin_ids or attested_checks or set(local_options) - {"--expected-settings-sha256"}:
+            raise WoonError("disable-runnable-remote-execution accepts only preview/apply options")
+        result = service.disable_runnable_remote_execution(
+            apply=apply,
+            expected_settings_sha256=local_options.get("--expected-settings-sha256"),
+        )
+    elif action == "runnable-companion-status":
         if plugin_ids or local_options or attested_checks:
-            raise WoonError("configure-prisma-calendar does not accept --plugin")
-        result = service.configure_prisma_calendar()
-    elif action == "configure-full-calendar-remastered":
-        if plugin_ids or local_options or attested_checks:
-            raise WoonError("configure-full-calendar-remastered does not accept --plugin")
-        result = service.configure_full_calendar_remastered()
-    elif action == "configure-notion-bases-calendar":
-        if plugin_ids or local_options or attested_checks:
-            raise WoonError("configure-notion-bases-calendar does not accept --plugin")
-        result = service.configure_notion_bases_calendar()
-    elif action == "configure-link-calendar":
-        if plugin_ids or local_options or attested_checks:
-            raise WoonError("configure-link-calendar does not accept --plugin")
-        result = service.configure_link_calendar()
+            raise WoonError("runnable-companion-status accepts only --vault")
+        result = service.runnable_companion_status()
+    elif action in companion_actions:
+        required = {
+            "start-runnable-companion": {"--companion-cli", "--node-cli", "--docker-cli"},
+            "stop-runnable-companion": {"--pid", "--docker-cli"},
+            "pair-runnable-companion": {"--obsidian-cli", "--vault-name"},
+            "recover-runnable-companion-orphan": {"--pid"},
+        }[action]
+        if (
+            plugin_ids
+            or attested_checks
+            or required.difference(local_options)
+            or set(local_options).difference(required | {"--expected-state"})
+        ):
+            raise WoonError(
+                action
+                + " requires only "
+                + ", ".join(sorted(required))
+                + " and optional --apply --expected-state"
+            )
+        if action == "start-runnable-companion":
+            result = service.start_runnable_companion(
+                Path(local_options["--companion-cli"]),
+                Path(local_options["--node-cli"]),
+                Path(local_options["--docker-cli"]),
+                apply=apply,
+                expected_state=local_options.get("--expected-state"),
+            )
+        elif action == "pair-runnable-companion":
+            result = service.pair_runnable_companion(
+                Path(local_options["--obsidian-cli"]),
+                local_options["--vault-name"],
+                apply=apply,
+                expected_state=local_options.get("--expected-state"),
+            )
+        else:
+            if not local_options["--pid"].isdigit() or int(local_options["--pid"]) <= 1:
+                raise WoonError("--pid must identify one positive non-init process")
+            if action == "stop-runnable-companion":
+                result = service.stop_runnable_companion(
+                    int(local_options["--pid"]),
+                    Path(local_options["--docker-cli"]),
+                    apply=apply,
+                    expected_state=local_options.get("--expected-state"),
+                )
+            else:
+                result = service.recover_runnable_companion_orphan(
+                    int(local_options["--pid"]),
+                    apply=apply,
+                    expected_state=local_options.get("--expected-state"),
+                )
     elif action == "attest-link-calendar-runtime":
         if plugin_ids or local_options:
             raise WoonError(
@@ -1380,6 +1642,42 @@ def _run_codex_knowledge_entry_recording(arguments: list[str], output: TextIO) -
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
 
 
+def _run_conversation_source_recording(arguments: list[str], output: TextIO) -> None:
+    """Read a typed app snapshot and archive only explicitly opted-in completed turns."""
+    from woon_core.knowledge.conversation_adapter import completed_turn_bundles
+
+    values: dict[str, str] = {}
+    for index in range(0, len(arguments), 2):
+        key = arguments[index]
+        if (
+            key not in {"--vault", "--input", "--day"}
+            or key in values
+            or index + 1 >= len(arguments)
+        ):
+            raise WoonError("record-conversation-source requires --vault, --input and --day")
+        values[key] = arguments[index + 1]
+    if set(values) != {"--vault", "--input", "--day"}:
+        raise WoonError("record-conversation-source requires --vault, --input and --day")
+    vault = Path(values["--vault"]).expanduser().resolve()
+    try:
+        policy = json.loads((vault / "config/conversation-sources.json").read_text())
+        snapshot = json.loads(Path(values["--input"]).expanduser().read_text())
+        allowed = policy["allowed_thread_ids"]
+        if (
+            policy.get("version") != 1
+            or not isinstance(allowed, list)
+            or not all(isinstance(item, str) and item for item in allowed)
+        ):
+            raise WoonError("invalid conversation opt-in policy")
+        bundles = completed_turn_bundles(
+            snapshot, allowed_thread_ids=tuple(allowed), day=date.fromisoformat(values["--day"])
+        )
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise WoonError("invalid conversation snapshot or opt-in policy") from error
+    results = [asdict(record_codex_source_bundle(vault, bundle)) for bundle in bundles]
+    print(json.dumps({"status": "ok", "turns": results}, ensure_ascii=False, indent=2), file=output)
+
+
 def _run_codex_source_recording(arguments: list[str], output: TextIO) -> None:
     """Archive one allowed conversation bundle from a private local JSON file."""
 
@@ -1455,29 +1753,6 @@ def _run_legacy_daily_digest_migration(arguments: list[str], output: TextIO) -> 
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
 
 
-def _run_schedule_apply(arguments: list[str], output: TextIO) -> None:
-    values: dict[str, str] = {}
-    raw_options: list[str] = []
-    index = 0
-    while index < len(arguments):
-        option = arguments[index]
-        if option != "--candidate":
-            raw_options.append(option)
-            index += 1
-            continue
-        if option in values or index + 1 >= len(arguments):
-            raise WoonError(f"{option} requires exactly one value")
-        values[option] = arguments[index + 1]
-        index += 2
-    vault, options = _parse_knowledge_options(raw_options)
-    if options or set(values) != {"--candidate"}:
-        raise WoonError("knowledge schedule-apply requires --candidate")
-    receipt = apply_policy_authorized_schedule_candidate(
-        vault or resolve_knowledge_vault(), Path(values["--candidate"])
-    )
-    print(json.dumps(receipt_record(receipt), ensure_ascii=False, indent=2), file=output)
-
-
 def _run_public_projection(arguments: list[str], output: TextIO) -> None:
     """Prepare or explicitly apply the Vault-owned public site input projection."""
 
@@ -1522,7 +1797,7 @@ def _run_public_projection(arguments: list[str], output: TextIO) -> None:
                 "output_sha256": report.output_sha256,
                 "content_root": report.content_root.as_posix(),
                 "changed": result.changed if result is not None else False,
-                "receipt_path": (result.receipt_path.as_posix() if result is not None else None),
+                "receipt_path": result.receipt_path.as_posix() if result is not None else None,
             },
             ensure_ascii=False,
             indent=2,
@@ -1554,7 +1829,7 @@ def _run_novel_wiki_projection(arguments: list[str], output: TextIO) -> None:
         projection_day = date.fromisoformat(values.get("--day", date.today().isoformat()))
     except ValueError as error:
         raise WoonError("knowledge project-novel --day must be YYYY-MM-DD") from error
-    source = vault / "wiki/private/_sources/novel"
+    source = vault / private_source_relative(vault, "novel")
     report = prepare_novel_wiki_projection(vault, source, projection_day=projection_day)
     apply_novel_wiki_projection(vault, report)
     print(
@@ -1641,7 +1916,11 @@ def _run_wiki_restructure_preflight(arguments: list[str], output: TextIO) -> Non
         else resolve_knowledge_vault()
     )
     report = prepare_wiki_restructure_preflight(vault, Path(manifest))
-    pending = report.disposition_counts.get("review", 0)
+    pending_review = report.disposition_counts.get("review", 0)
+    pending_non_apply = sum(
+        report.disposition_counts.get(action, 0) for action in ("merge", "retire")
+    )
+    pending = pending_review + pending_non_apply
     print(
         json.dumps(
             {
@@ -1649,8 +1928,83 @@ def _run_wiki_restructure_preflight(arguments: list[str], output: TextIO) -> Non
                 "document_count": report.document_count,
                 "disposition_counts": report.disposition_counts,
                 "target_count": report.target_count,
-                "pending_review_count": pending,
+                "pending_review_count": pending_review,
+                "pending_non_apply_count": pending_non_apply,
+                "pending_action_count": pending,
                 "issues": list(report.issues),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
+
+
+def _run_wiki_restructure_apply(arguments: list[str], output: TextIO) -> None:
+    """Apply a reviewed v2/v3 Wiki restructure manifest."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--manifest", "--vault"}:
+            raise WoonError(f"unexpected knowledge restructure-apply argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    manifest = values.get("--manifest")
+    if manifest is None:
+        raise WoonError("knowledge restructure-apply requires --manifest <local-path>")
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    report = apply_wiki_restructure(vault, Path(manifest))
+    print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_wiki_content_quality_audit(arguments: list[str], output: TextIO) -> None:
+    """Write one local-only all-document readiness inventory."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--output", "--vault"}:
+            raise WoonError(f"unexpected knowledge content-quality-audit argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    destination = values.get("--output")
+    if destination is None:
+        raise WoonError("knowledge content-quality-audit requires --output <local-path>")
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    report = audit_wiki_content_quality(vault)
+    written = write_wiki_content_quality_audit(vault, Path(destination), report)
+    print(
+        json.dumps(
+            {
+                "status": "invalid" if report.errors else "ok",
+                "output": written.as_posix(),
+                "document_count": report.document_count,
+                "compiler_documents": report.compiler_documents,
+                "manual_documents": report.manual_documents,
+                "navigation_documents": report.navigation_documents,
+                "reader_documents": report.reader_documents,
+                "runnable_code_blocks": report.runnable_code_blocks,
+                "execution_contract_counts": report.execution_contract_counts,
+                "quality_status_counts": report.quality_status_counts,
+                "publication_readiness_counts": report.publication_readiness_counts,
+                "errors": list(report.errors),
             },
             ensure_ascii=False,
             indent=2,
@@ -1721,6 +2075,39 @@ def _run_wiki_restructure_classification(arguments: list[str], output: TextIO) -
     print(
         json.dumps(
             {"status": "ok", "classification": written.relative_to(vault).as_posix()},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
+
+
+def _run_wiki_restructure_inventory(arguments: list[str], output: TextIO) -> None:
+    """Write the full ownership and link inventory before assigning final parents."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--output", "--vault"}:
+            raise WoonError(f"unexpected knowledge restructure-inventory argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    destination = values.get("--output")
+    if destination is None:
+        raise WoonError("knowledge restructure-inventory requires --output <local-path>")
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    written = write_wiki_restructure_inventory(vault, Path(destination))
+    print(
+        json.dumps(
+            {"status": "ok", "inventory": written.relative_to(vault).as_posix()},
             ensure_ascii=False,
             indent=2,
         ),
@@ -1808,6 +2195,43 @@ def _run_source_restructure_catalog_audit(arguments: list[str], output: TextIO) 
         ),
         file=output,
     )
+
+
+def _run_source_restructure_owner_reconciliation(arguments: list[str], output: TextIO) -> None:
+    """Give every raw source file exactly one primary catalog owner."""
+
+    values = _source_restructure_options(arguments, command="source-restructure-reconcile-owners")
+    if set(values) - {"--vault"}:
+        raise WoonError("knowledge source-restructure-reconcile-owners takes only --vault")
+    report = reconcile_raw_source_catalog_owners(_source_restructure_vault(values))
+    print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_source_restructure_manifest_reconciliation(arguments: list[str], output: TextIO) -> None:
+    """Write a ready-to-apply raw-source manifest with ownership evidence."""
+
+    values = _source_restructure_options(arguments, command="source-restructure-reconcile-manifest")
+    manifest = values.get("--manifest")
+    destination = values.get("--output")
+    if manifest is None or destination is None:
+        raise WoonError(
+            "knowledge source-restructure-reconcile-manifest requires --manifest and --output"
+        )
+    report = write_reconciled_source_restructure_manifest(
+        _source_restructure_vault(values), Path(manifest), Path(destination)
+    )
+    print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_source_restructure_apply(arguments: list[str], output: TextIO) -> None:
+    """Apply the reviewed raw-source move and preserve all source bytes."""
+
+    values = _source_restructure_options(arguments, command="source-restructure-apply")
+    manifest = values.get("--manifest")
+    if manifest is None:
+        raise WoonError("knowledge source-restructure-apply requires --manifest <local-path>")
+    report = apply_source_restructure(_source_restructure_vault(values), Path(manifest))
+    print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
 
 
 def _source_restructure_options(arguments: list[str], *, command: str) -> dict[str, str]:
@@ -1923,6 +2347,8 @@ def _run_book_promotion(arguments: list[str], output: TextIO) -> None:
     }
     if "staged_assets" in payload:
         expected_fields.add("staged_assets")
+    if "audit_scope" in payload:
+        expected_fields.add("audit_scope")
     if set(payload) != expected_fields:
         raise WoonError("book-promote input fields are invalid for the current payload schema")
     raw_pages = payload.get("pages") if isinstance(payload, dict) else None
@@ -1950,7 +2376,18 @@ def _run_book_promotion(arguments: list[str], output: TextIO) -> None:
     require_book_workflow_manifest(payload, "book-promote")
     staged_assets = _parse_staged_book_assets(payload.get("staged_assets"), input_path)
     _, service = build_knowledge_service(vault)
-    if apply:
+    audit_options: dict[str, Any] = {}
+    if "audit_scope" in payload:
+        scope = payload["audit_scope"]
+        if not isinstance(scope, str) or scope not in {"all", "affected"}:
+            raise WoonError("book-promote audit_scope must be all or affected")
+        audit_options["audit_scope"] = scope
+    if apply and audit_options:
+        scoped_report = service.apply_verified_book_update(
+            tuple(pages), {}, {}, {}, coverage_manifest, staged_assets, **audit_options
+        )
+        result = {**asdict(scoped_report), "applied": True}
+    elif apply:
         apply_report = service.promote_verified_book_pages(
             tuple(pages), coverage_manifest, staged_assets
         )
@@ -1963,6 +2400,7 @@ def _run_book_promotion(arguments: list[str], output: TextIO) -> None:
             {},
             coverage_manifest,
             staged_assets,
+            **audit_options,
         )
         result = {**asdict(preflight_report), "applied": False}
     print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
@@ -2167,6 +2605,8 @@ def _run_atomic_book_update(arguments: list[str], output: TextIO) -> None:
         required_fields.add("retirement_image_replacements")
     if isinstance(payload, dict) and "retirement_content_relocations" in payload:
         required_fields.add("retirement_content_relocations")
+    if isinstance(payload, dict) and "audit_scope" in payload:
+        required_fields.add("audit_scope")
     require_current_book_contract(payload, "book-promote-retire")
     if not isinstance(payload, dict) or set(payload) != required_fields:
         raise WoonError("book-promote-retire input fields are invalid")
@@ -2225,6 +2665,13 @@ def _run_atomic_book_update(arguments: list[str], output: TextIO) -> None:
     }
     if retirement_content_relocations:
         retirement_options["retirement_content_relocations"] = retirement_content_relocations
+    if "audit_scope" in payload:
+        if not isinstance(payload["audit_scope"], str) or payload["audit_scope"] not in {
+            "all",
+            "affected",
+        }:
+            raise WoonError("book-promote-retire audit_scope must be all or affected")
+        retirement_options["audit_scope"] = payload["audit_scope"]
     if apply:
         report = service.apply_verified_book_update(
             tuple(pages),
@@ -2609,6 +3056,9 @@ def _run_compiled_knowledge(command: str, arguments: list[str], output: TextIO) 
 
     force = False
     page_ids: list[str] = []
+    source_id: str | None = None
+    body_file: Path | None = None
+    locator_replacements: list[tuple[str, str]] = []
     raw_options: list[str] = []
     index = 0
     while index < len(arguments):
@@ -2618,14 +3068,56 @@ def _run_compiled_knowledge(command: str, arguments: list[str], output: TextIO) 
                 raise WoonError("--force is supported only by knowledge compile")
             force = True
         elif option == "--page":
-            if command != "compile":
-                raise WoonError("--page is supported only by knowledge compile")
+            if command not in {
+                "compile",
+                "retire-nonrendered-provenance",
+                "curate-current-provenance",
+            }:
+                raise WoonError(
+                    "--page is supported only by knowledge compile or page provenance curation"
+                )
             if index + 1 >= len(arguments):
                 raise WoonError("--page requires a canonical ID")
             page_id = arguments[index + 1].strip()
             if not page_id:
                 raise WoonError("--page requires a canonical ID")
             page_ids.append(page_id)
+            index += 1
+        elif option == "--source":
+            if command not in {
+                "retire-nonrendered-provenance",
+                "rebase-nonrendered-shared-provenance",
+            }:
+                raise WoonError("--source is supported only by provenance maintenance")
+            if source_id is not None or index + 1 >= len(arguments):
+                raise WoonError("--source requires exactly one source ID")
+            source_id = arguments[index + 1].strip()
+            if not source_id:
+                raise WoonError("--source requires exactly one source ID")
+            index += 1
+        elif option == "--body-file":
+            if command not in {
+                "curate-current-provenance",
+                "rebase-nonrendered-shared-provenance",
+            }:
+                raise WoonError("--body-file is supported only by provenance body revisions")
+            if body_file is not None or index + 1 >= len(arguments):
+                raise WoonError("--body-file requires exactly one local Markdown file")
+            candidate = Path(arguments[index + 1]).expanduser().resolve()
+            if not candidate.is_file():
+                raise WoonError(f"--body-file must be a readable local file: {candidate}")
+            body_file = candidate
+            index += 1
+        elif option == "--replace":
+            if command != "relocate-current-source-locators" or index + 1 >= len(arguments):
+                raise WoonError("--replace is supported only by source locator migration")
+            value = arguments[index + 1]
+            if value.count("=") != 1:
+                raise WoonError("--replace requires exactly one <old-prefix>=<new-prefix> value")
+            current, target = (part.strip() for part in value.split("=", 1))
+            if not current or not target:
+                raise WoonError("--replace requires non-empty source and target prefixes")
+            locator_replacements.append((current, target))
             index += 1
         else:
             raw_options.append(option)
@@ -2649,6 +3141,42 @@ def _run_compiled_knowledge(command: str, arguments: list[str], output: TextIO) 
     if command == "reconcile-superseded-revisions":
         report = service.reconcile_superseded_compiled_wiki_revisions()
         print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
+        return
+    if command == "retire-nonrendered-provenance":
+        if len(page_ids) != 1 or source_id is None:
+            raise WoonError(
+                "knowledge retire-nonrendered-provenance requires exactly one --page and --source"
+            )
+        retirement = service.retire_nonrendered_compiled_wiki_provenance(page_ids[0], source_id)
+        print(json.dumps(asdict(retirement), ensure_ascii=False, indent=2), file=output)
+        return
+    if command == "curate-current-provenance":
+        if len(page_ids) != 1 or body_file is None:
+            raise WoonError(
+                "knowledge curate-current-provenance requires exactly one --page and --body-file"
+            )
+        revision = service.curate_current_compiled_wiki_provenance(
+            page_ids[0], body_file.read_text(encoding="utf-8")
+        )
+        print(json.dumps(asdict(revision), ensure_ascii=False, indent=2), file=output)
+        return
+    if command == "rebase-nonrendered-shared-provenance":
+        if source_id is None or body_file is None:
+            raise WoonError(
+                "knowledge rebase-nonrendered-shared-provenance requires --source and --body-file"
+            )
+        rebase = service.rebase_nonrendered_shared_compiled_wiki_provenance(
+            source_id, body_file.read_text(encoding="utf-8")
+        )
+        print(json.dumps(asdict(rebase), ensure_ascii=False, indent=2), file=output)
+        return
+    if command == "relocate-current-source-locators":
+        if not locator_replacements:
+            raise WoonError("knowledge relocate-current-source-locators requires --replace")
+        locator_migration = service.relocate_current_compiled_wiki_source_locators(
+            tuple(locator_replacements)
+        )
+        print(json.dumps(asdict(locator_migration), ensure_ascii=False, indent=2), file=output)
         return
     if command == "compile":
         compilation = service.compile(force=force, page_ids=tuple(page_ids))

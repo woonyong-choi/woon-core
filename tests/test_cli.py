@@ -1,18 +1,13 @@
 import hashlib
 import json
-from datetime import UTC, date, datetime
+from datetime import date
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 
 from woon_core import cli
-from woon_core.calendar.constants import LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS
-from woon_core.calendar.manual_schedule import UserScheduleRequest
-from woon_core.calendar.migration import LegacyCalendarMigrationResult
-from woon_core.calendar.projection import CalendarProjectionResult
 from woon_core.cli import run
 from woon_core.errors import WoonError
 from woon_core.knowledge.book_contract import (
@@ -26,15 +21,17 @@ from woon_core.knowledge.compiled_wiki import (
     BookCoverageScopeRevision,
     CompileReport,
     CuratedRevisionReport,
+    RetiredProvenanceReport,
     RevisionReconciliationReport,
+    SharedProvenanceRebaseReport,
     StagedBookAsset,
     VerifiedBookPage,
     VerifiedBookPreflightReport,
     VerifiedBookUpdateReport,
 )
 from woon_core.knowledge.mail_schedule_automation import MailScheduleRecordResult
+from woon_core.knowledge.obsidian_plugins import LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS
 from woon_core.knowledge.orchestration import OrchestratorSettings
-from woon_core.knowledge.schedule_bridge import ScheduleReceipt
 from woon_core.skills import RoutingCaseResult, RoutingEvalResult
 
 
@@ -47,6 +44,42 @@ def test_version() -> None:
 def test_unknown_command_fails() -> None:
     with pytest.raises(WoonError, match="unknown command"):
         run(["unknown"], StringIO())
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "retire-apple-calendar-source",
+        "configure-google-two-way-source",
+        "disable-runnable-remote-execution",
+    ],
+)
+def test_calendar_source_cli_passes_preview_hash_without_exposing_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    calls = []
+
+    class PluginService:
+        def __init__(self, vault: Path) -> None:
+            assert vault == tmp_path
+
+        def retire_apple_calendar_source(self, **options):
+            calls.append(options)
+            return {"before_sha256": "preview-hash", "changed": True}
+
+        configure_google_two_way_source = retire_apple_calendar_source
+        disable_runnable_remote_execution = retire_apple_calendar_source
+
+    monkeypatch.setattr(cli, "ObsidianPluginService", PluginService)
+    args = ["knowledge", "obsidian-plugin", action, "--vault", str(tmp_path)]
+    run(args, StringIO())
+    run(args + ["--apply", "--expected-settings-sha256", "preview-hash"], StringIO())
+    assert calls == [
+        {"apply": False, "expected_settings_sha256": None},
+        {"apply": True, "expected_settings_sha256": "preview-hash"},
+    ]
 
 
 def test_governance_skill_inventory_rejects_installed_copy_drift(tmp_path: Path) -> None:
@@ -74,7 +107,11 @@ def test_active_instruction_files_excludes_archived_source_evidence(tmp_path: Pa
     nested = repository / "docs/CLAUDE.md"
     archived = repository / "wiki/private/_sources/legacy/AGENTS.md"
     local = repository / ".local/snapshot/CLAUDE.md"
-    for path in (active, nested, archived, local):
+    raw = repository / "private/knowledge/legacy/AGENTS.md"
+    manifest = repository / ".woon/repository.yaml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("path_audit_raw_roots: [private, sources]\n")
+    for path in (active, nested, archived, local, raw):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("instruction", encoding="utf-8")
 
@@ -86,140 +123,6 @@ def test_retired_daily_digest_commands_are_not_cli_entrypoints() -> None:
         run(["knowledge", "materialize-codex-daily-digest"], StringIO())
     with pytest.raises(WoonError, match="unknown knowledge command"):
         run(["knowledge", "record-codex-daily-digest"], StringIO())
-
-
-def test_calendar_migrate_legacy_uses_the_native_calendar_adapter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        "woon_core.calendar.cli.migrate_legacy_owned_calendar",
-        lambda vault: LegacyCalendarMigrationResult(True, "Woon 일정", "event-001"),
-    )
-    output = StringIO()
-
-    run(["calendar", "migrate-legacy", "--vault", str(tmp_path)], output)
-
-    assert output.getvalue() == (
-        "status: ok\nmigrated: true\ncalendar_name: Woon 일정\ncalendar_event_id: event-001\n"
-    )
-
-
-def test_calendar_refresh_reports_markdown_and_ics_projection_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class CalendarService:
-        def refresh(self) -> CalendarProjectionResult:
-            return CalendarProjectionResult(
-                changed=False,
-                event_count=10,
-                relative_path="inbox/calendar/events",
-                ics_relative_path="inbox/calendar/apple-calendar.ics",
-                start_at=datetime(2026, 8, 18, 0, 0, tzinfo=UTC),
-                end_at=datetime(2026, 8, 18, 1, 0, tzinfo=UTC),
-            )
-
-    monkeypatch.setattr(
-        "woon_core.calendar.cli.build_calendar_projection_service", lambda vault: CalendarService()
-    )
-    output = StringIO()
-
-    run(["calendar", "refresh", "--vault", str(tmp_path)], output)
-
-    assert output.getvalue() == (
-        "status: ok\nchanged: false\nevents: 10\n"
-        "calendar_markdown: inbox/calendar/events\n"
-        "calendar_ics: inbox/calendar/apple-calendar.ics\n"
-    )
-
-
-def test_knowledge_configure_full_calendar_uses_the_receipt_adapter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    captured: dict[str, Path] = {}
-
-    class PluginService:
-        def __init__(self, vault: Path) -> None:
-            captured["vault"] = vault
-
-        def configure_full_calendar_remastered(self) -> dict[str, str]:
-            return {"action": "configure-full-calendar-remastered"}
-
-    monkeypatch.setattr(cli, "ObsidianPluginService", PluginService)
-    output = StringIO()
-
-    run(
-        [
-            "knowledge",
-            "obsidian-plugin",
-            "configure-full-calendar-remastered",
-            "--vault",
-            str(tmp_path),
-        ],
-        output,
-    )
-
-    assert captured == {"vault": tmp_path}
-    assert '"action": "configure-full-calendar-remastered"' in output.getvalue()
-
-
-def test_knowledge_configure_notion_bases_uses_the_receipt_adapter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    captured: dict[str, Path] = {}
-
-    class PluginService:
-        def __init__(self, vault: Path) -> None:
-            captured["vault"] = vault
-
-        def configure_notion_bases_calendar(self) -> dict[str, str]:
-            return {"action": "configure-notion-bases-calendar"}
-
-    monkeypatch.setattr(cli, "ObsidianPluginService", PluginService)
-    output = StringIO()
-
-    run(
-        [
-            "knowledge",
-            "obsidian-plugin",
-            "configure-notion-bases-calendar",
-            "--vault",
-            str(tmp_path),
-        ],
-        output,
-    )
-
-    assert captured == {"vault": tmp_path}
-    assert '"action": "configure-notion-bases-calendar"' in output.getvalue()
-
-
-def test_knowledge_configure_link_calendar_uses_the_receipt_adapter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    captured: dict[str, Path] = {}
-
-    class PluginService:
-        def __init__(self, vault: Path) -> None:
-            captured["vault"] = vault
-
-        def configure_link_calendar(self) -> dict[str, str]:
-            return {"action": "configure-link-calendar"}
-
-    monkeypatch.setattr(cli, "ObsidianPluginService", PluginService)
-    output = StringIO()
-
-    run(
-        [
-            "knowledge",
-            "obsidian-plugin",
-            "configure-link-calendar",
-            "--vault",
-            str(tmp_path),
-        ],
-        output,
-    )
-
-    assert captured == {"vault": tmp_path}
-    assert '"action": "configure-link-calendar"' in output.getvalue()
 
 
 def test_knowledge_attest_link_calendar_runtime_records_manual_checks(
@@ -298,56 +201,6 @@ def test_knowledge_install_local_build_uses_the_receipt_adapter(
         "expected_version": "0.4.1",
     }
     assert '"action": "install-local-build"' in output.getvalue()
-
-
-def test_calendar_upsert_uses_one_user_authorized_request(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    captured: dict[str, object] = {}
-
-    def upsert(vault: Path, request: object) -> ScheduleReceipt:
-        captured.update(vault=vault, request=request)
-        return ScheduleReceipt(
-            candidate_id="user-calendar:sample-event",
-            lifecycle="create",
-            idempotency_key="user-calendar:sample-event",
-            calendar_event_id="event-001",
-        )
-
-    monkeypatch.setattr("woon_core.calendar.cli.apply_user_authorized_schedule", upsert)
-    output = StringIO()
-    run(
-        [
-            "calendar",
-            "upsert",
-            "--id",
-            "sample-event",
-            "--title",
-            "면접 동행",
-            "--start",
-            "2026-08-19T11:00:00+09:00",
-            "--end",
-            "2026-08-19T12:00:00+09:00",
-            "--category",
-            "relationship",
-            "--location",
-            "센터필드 East 타워",
-            "--notes",
-            "신분증을 지참한다.",
-            "--display-category",
-            "false",
-            "--vault",
-            str(tmp_path),
-        ],
-        output,
-    )
-
-    assert captured["vault"] == tmp_path
-    request = cast(UserScheduleRequest, captured["request"])
-    assert request.event_id == "sample-event"
-    assert request.location == "센터필드 East 타워"
-    assert request.display_category is False
-    assert "calendar_event_id: event-001" in output.getvalue()
 
 
 def test_knowledge_validate_orchestrator_has_no_runtime_side_effect(
@@ -459,39 +312,6 @@ def test_knowledge_validate_orchestrator_can_verify_registered_heartbeats(
 
     assert captured == {"root": registry}
     assert '"codex_registry_verified": [' in output.getvalue()
-
-
-def test_knowledge_schedule_apply_requires_one_policy_authorized_candidate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    candidate = tmp_path / "brain/review/schedule-apply/candidate-001.json"
-    captured: dict[str, object] = {}
-
-    def apply(vault: Path, path: Path) -> ScheduleReceipt:
-        captured.update(vault=vault, path=path)
-        return ScheduleReceipt(
-            candidate_id="candidate-001",
-            lifecycle="create",
-            idempotency_key="schedule-001",
-            calendar_event_id="event-001",
-        )
-
-    monkeypatch.setattr(cli, "apply_policy_authorized_schedule_candidate", apply)
-    output = StringIO()
-    run(
-        [
-            "knowledge",
-            "schedule-apply",
-            "--vault",
-            str(tmp_path),
-            "--candidate",
-            str(candidate),
-        ],
-        output,
-    )
-
-    assert captured == {"vault": tmp_path, "path": candidate}
-    assert '"calendar_event_id": "event-001"' in output.getvalue()
 
 
 def test_knowledge_records_empty_mail_window_through_the_local_cli(
@@ -659,6 +479,145 @@ def test_knowledge_reconcile_superseded_revisions_uses_compiler_service(
     run(["knowledge", "reconcile-superseded-revisions", "--vault", str(vault)], output)
 
     assert '"archived_sources": 2' in output.getvalue()
+    assert '"superseded_claims": 2' in output.getvalue()
+
+
+def test_knowledge_retire_nonrendered_provenance_uses_compiler_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    service = SimpleNamespace(
+        retire_nonrendered_compiled_wiki_provenance=lambda page_id, source_id: (
+            RetiredProvenanceReport(
+                page_id=page_id,
+                source_id=source_id,
+                claim_id="claim://old",
+                successor_source_id="source://current",
+                successor_claim_id="claim://current",
+                compiled=1,
+                unchanged=0,
+            )
+        )
+    )
+    monkeypatch.setattr(
+        cli,
+        "build_knowledge_service",
+        lambda actual_vault: (SimpleNamespace(vault=actual_vault), service),
+    )
+
+    output = StringIO()
+    run(
+        [
+            "knowledge",
+            "retire-nonrendered-provenance",
+            "--page",
+            "resources/books",
+            "--source",
+            "source://verified-book/resources/books/old",
+            "--vault",
+            str(vault),
+        ],
+        output,
+    )
+
+    assert '"page_id": "resources/books"' in output.getvalue()
+    assert '"source_id": "source://verified-book/resources/books/old"' in output.getvalue()
+
+
+def test_knowledge_curate_current_provenance_reads_a_local_body_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    body_file = tmp_path / "revision.md"
+    body_file.write_text("검증한 현재 본문입니다.\n", encoding="utf-8")
+    captured: dict[str, str] = {}
+    service = SimpleNamespace(
+        curate_current_compiled_wiki_provenance=lambda page_id, body: (
+            captured.update({"page_id": page_id, "body": body})
+            or CuratedRevisionReport(
+                curated=1,
+                compiled=1,
+                unchanged=0,
+                page_ids=(page_id,),
+            )
+        )
+    )
+    monkeypatch.setattr(
+        cli,
+        "build_knowledge_service",
+        lambda actual_vault: (SimpleNamespace(vault=actual_vault), service),
+    )
+
+    output = StringIO()
+    run(
+        [
+            "knowledge",
+            "curate-current-provenance",
+            "--page",
+            "tools/transformer-explainer-local-runbook",
+            "--body-file",
+            str(body_file),
+            "--vault",
+            str(vault),
+        ],
+        output,
+    )
+
+    assert captured == {
+        "page_id": "tools/transformer-explainer-local-runbook",
+        "body": "검증한 현재 본문입니다.\n",
+    }
+    assert '"curated": 1' in output.getvalue()
+
+
+def test_knowledge_rebase_nonrendered_shared_provenance_uses_compiler_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    body_file = tmp_path / "revision.md"
+    body_file.write_text("검증한 공유 provenance 본문입니다.\n", encoding="utf-8")
+    captured: dict[str, str] = {}
+    service = SimpleNamespace(
+        rebase_nonrendered_shared_compiled_wiki_provenance=lambda source_id, body: (
+            captured.update({"source_id": source_id, "body": body})
+            or SharedProvenanceRebaseReport(
+                source_id=source_id,
+                successor_source_id="source://curated-source-revision/shared",
+                superseded_claims=2,
+                page_ids=("ai/one", "ai/two"),
+                compiled=2,
+                unchanged=0,
+            )
+        )
+    )
+    monkeypatch.setattr(
+        cli,
+        "build_knowledge_service",
+        lambda actual_vault: (SimpleNamespace(vault=actual_vault), service),
+    )
+
+    output = StringIO()
+    run(
+        [
+            "knowledge",
+            "rebase-nonrendered-shared-provenance",
+            "--source",
+            "source://external-learning/shared",
+            "--body-file",
+            str(body_file),
+            "--vault",
+            str(vault),
+        ],
+        output,
+    )
+
+    assert captured == {
+        "source_id": "source://external-learning/shared",
+        "body": "검증한 공유 provenance 본문입니다.\n",
+    }
     assert '"superseded_claims": 2' in output.getvalue()
 
 
@@ -2028,7 +1987,7 @@ def test_knowledge_project_novel_does_not_resolve_default_for_explicit_vault(
 
     assert calls == [
         vault.resolve(),
-        vault.resolve() / "wiki/private/_sources/novel",
+        vault.resolve() / "private/novel",
         date(2026, 8, 27),
         vault.resolve(),
         report,

@@ -29,15 +29,14 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --all-extras --dev
       - run: uv run ruff check src tests
+        if: runner.os == 'Linux'
       - run: uv run ruff format --check src tests
+        if: runner.os == 'Linux'
       - run: uv run mypy src
+        if: runner.os == 'Linux'
       - run: uv run pytest
-      - name: Compile and exercise EventKit bridge
-        if: runner.os == 'macOS'
-        run: |
-          swiftc scripts/woon-calendar-bridge.swift -o /tmp/woon-calendar-bridge
-          /tmp/woon-calendar-bridge --self-test
       - run: uv build
+        if: runner.os == 'Linux'
 
   windows-compatibility:
     runs-on: windows-latest
@@ -48,9 +47,6 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync --locked --all-extras --dev
-      - run: uv run ruff check src tests
-      - run: uv run ruff format --check src tests
-      - run: uv run mypy src
       - name: Verify package and timezone data
         run: |
           uv run woon version

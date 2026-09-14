@@ -1,4 +1,4 @@
-"""Policy-authorized, idempotent Apple Calendar bridge contract."""
+"""Provider-neutral, authorized and idempotent calendar bridge contract."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
-from woon_core.calendar.categories import CALENDAR_CATEGORY_IDS
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write, encode_json, exclusive_file_lock
+from woon_core.knowledge.calendar_categories import CALENDAR_CATEGORY_IDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +37,7 @@ class ScheduleCandidate:
 
 @dataclass(frozen=True, slots=True)
 class ScheduleReceipt:
-    """Stable Apple Calendar identifier returned after one completed operation."""
+    """Stable provider event identifier returned after one completed operation."""
 
     candidate_id: str
     lifecycle: Literal["create", "update", "cancel"]
@@ -46,7 +46,7 @@ class ScheduleReceipt:
 
 
 class CalendarPort(Protocol):
-    """Narrow EventKit-like port; permission is checked before every mutation."""
+    """Narrow calendar port; permission is checked before every mutation."""
 
     def ensure_permission(self) -> None: ...
 
@@ -64,7 +64,7 @@ class CalendarPort(Protocol):
 
 
 class ScheduleBridge:
-    """Apply one authorized appointment without duplicate Apple Calendar writes."""
+    """Apply one authorized appointment without duplicate provider writes."""
 
     def __init__(self, calendar: CalendarPort, *, state_path: Path | None = None) -> None:
         self._calendar = calendar
@@ -76,7 +76,7 @@ class ScheduleBridge:
         return dict(self._receipts)
 
     def calendar_event_id_for(self, idempotency_key: str) -> str:
-        """Return the EventKit ID only for a receipt-proven Woon appointment."""
+        """Return the provider event ID only for a receipt-proven Woon appointment."""
 
         if self._state_path is None:
             calendar_id = self._stable_ids.get(idempotency_key)
@@ -112,7 +112,7 @@ class ScheduleBridge:
         try:
             receipt = self._apply_external(candidate)
         except BaseException:
-            # An EventKit write could have succeeded before this process stopped.
+            # A provider write could have succeeded before this process stopped.
             # Keep the pending marker so retries cannot create a second event.
             raise
         self._pending.remove(operation_key)
@@ -170,7 +170,7 @@ class ScheduleBridge:
 
 
 class FakeCalendarPort:
-    """Deterministic fixture port; never communicates with Apple Calendar."""
+    """Deterministic fixture port; never communicates with an external calendar."""
 
     def __init__(self, *, permission_granted: bool = True) -> None:
         self.permission_granted = permission_granted
