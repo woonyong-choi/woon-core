@@ -59,7 +59,7 @@ _INPUT_STATES = {
     "unavailable",
     "source-only",
 }
-_DIGEST_RENDER_REVISION = "31"
+_DIGEST_RENDER_REVISION = "32"
 _DAILY_ENTRY_LIMIT = 256
 _VISIBLE_LIMIT = 900
 _TITLE_LIMIT = 80
@@ -84,6 +84,12 @@ _KEYWORD_CANDIDATES = (
     "Claude",
     "Herdr",
     "Google Calendar",
+    "Manta Calendar",
+    "Manta Graph",
+    "Manta Code Blocks",
+    "Manta Diagrams",
+    "Manta",
+    # Retain historical names when indexing unchanged source records.
     "Link Calendar",
     "Linked Graph",
     "AICE",

@@ -68,7 +68,7 @@ def _run_mcp() -> None:
 
     FastMCPSettings.model_rebuild()
     server = FastMCP(
-        "Woon Knowledge Workflow",
+        "Manta",
         instructions=(
             "Work only on the user's explicitly selected vault and existing Markdown note. "
             "Run takes one explicit source and an editing instruction, calls the user's "

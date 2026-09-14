@@ -134,7 +134,7 @@ def test_crash_after_external_write_leaves_pending_marker_and_blocks_replay(tmp_
     assert calendar.write_count == 1
 
 
-def test_failed_eventkit_requery_leaves_the_operation_pending_without_a_receipt(
+def test_failed_provider_requery_leaves_the_operation_pending_without_a_receipt(
     tmp_path: Path,
 ) -> None:
     class VerificationFailureCalendar(FakeCalendarPort):

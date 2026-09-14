@@ -550,7 +550,7 @@ def _local_context_graph_build(root: Path, version: str = "0.4.1") -> Path:
         json.dumps(
             {
                 "id": LINKED_GRAPH_ID,
-                "name": "Linked Graph",
+                "name": "Manta Graph",
                 "version": version,
                 "minAppVersion": "1.8.0",
             }
@@ -589,7 +589,7 @@ def _local_link_calendar_build(root: Path, version: str = LINK_CALENDAR_VERSION)
         json.dumps(
             {
                 "id": LINK_CALENDAR_ID,
-                "name": "Link Calendar",
+                "name": "Manta Calendar",
                 "version": version,
                 "minAppVersion": "1.10.0",
             }
@@ -630,7 +630,7 @@ def _local_runnable_code_blocks_build(
         json.dumps(
             {
                 "id": RUNNABLE_CODE_BLOCKS_ID,
-                "name": "Runnable Code Blocks",
+                "name": "Manta Code Blocks",
                 "version": version,
                 "minAppVersion": "1.13.0",
             }

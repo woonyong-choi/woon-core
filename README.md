@@ -456,15 +456,8 @@ woon env verify --all
 
 ## 저장소 구성
 
-- `woon-core`: policy and orchestration
-- `woon-skills`: skill catalog, profiles, locks, and conflicts
-- `woon-env`: deterministic IDE configuration
-- `woon-knowledge`: private durable knowledge
-- `woon-site`: private publishing source
-- `woonyong-kr`: generated GitHub profile output
-- `woonyong-kr.github.io`: protected Pages output
-
-두 출력 저장소는 GitHub가 요구하는 이름을 유지하며 rename 대상이 아니다.
+저장소 ID·경로·소유 역할은 [repository registry](registry/repositories.yaml)를 따른다.
+GitHub profile·Pages 출력 저장소는 registry에 등록된 이름과 호환 계약을 유지한다.
 
 ## 기여
 

@@ -688,27 +688,27 @@ class ObsidianPluginService:
     ) -> dict[str, Any]:
         self._require_vault()
         settings_path = self._plugins / LINK_CALENDAR_ID / "data.json"
-        _require_vault_local_file(self._vault, settings_path, "Link Calendar settings")
+        _require_vault_local_file(self._vault, settings_path, "Manta Calendar settings")
         manifest = self._installed_manifest(LINK_CALENDAR_ID)
         before = settings_path.read_bytes()
         before_hash = _sha256(before)
         if apply and expected_settings_sha256 != before_hash:
-            raise WoonError("Link Calendar settings changed or preview hash is missing; replan")
+            raise WoonError("Manta Calendar settings changed or preview hash is missing; replan")
         configuration = json.loads(before)
         if not isinstance(configuration, dict):
-            raise WoonError("Link Calendar settings must be an object")
+            raise WoonError("Manta Calendar settings must be an object")
         profiles = configuration.get("sourceProfiles", [])
         if not isinstance(profiles, list) or not all(
             isinstance(profile, dict) and isinstance(profile.get("id"), str) for profile in profiles
         ):
-            raise WoonError("Link Calendar sourceProfiles must have explicit profile IDs")
+            raise WoonError("Manta Calendar sourceProfiles must have explicit profile IDs")
         retired_id = "woon-apple-calendar"
         removed = sum(profile["id"] == retired_id for profile in profiles)
         if removed:
             configuration["sourceProfiles"] = [p for p in profiles if p["id"] != retired_id]
         google = configuration.get("googleCalendar", {})
         if not isinstance(google, dict):
-            raise WoonError("Link Calendar googleCalendar must be an object")
+            raise WoonError("Manta Calendar googleCalendar must be an object")
         selections = google.get("sourceProfileIds", [])
         if not isinstance(selections, list) or not all(isinstance(p, str) for p in selections):
             raise WoonError("Google Calendar sourceProfileIds must be a list of strings")
@@ -750,22 +750,22 @@ class ObsidianPluginService:
     ) -> dict[str, Any]:
         self._require_vault()
         settings_path = self._plugins / LINK_CALENDAR_ID / "data.json"
-        _require_vault_local_file(self._vault, settings_path, "Link Calendar settings")
+        _require_vault_local_file(self._vault, settings_path, "Manta Calendar settings")
         manifest = self._installed_manifest(LINK_CALENDAR_ID)
         before = settings_path.read_bytes()
         before_hash = _sha256(before)
         if apply and expected_settings_sha256 != before_hash:
-            raise WoonError("Link Calendar settings changed or preview hash is missing; replan")
+            raise WoonError("Manta Calendar settings changed or preview hash is missing; replan")
         configuration = json.loads(before)
         if not isinstance(configuration, dict):
-            raise WoonError("Link Calendar settings must be an object")
+            raise WoonError("Manta Calendar settings must be an object")
         # The plugin accepts both spellings; do not shadow an existing legacy collection.
         collection = "sourceProfiles" if "sourceProfiles" in configuration else "profiles"
         profiles = configuration.get(collection, [])
         if not isinstance(profiles, list) or not all(
             isinstance(profile, dict) and isinstance(profile.get("id"), str) for profile in profiles
         ):
-            raise WoonError("Link Calendar source profiles must have explicit profile IDs")
+            raise WoonError("Manta Calendar source profiles must have explicit profile IDs")
         if collection == "profiles" and "profiles" not in configuration:
             collection = "sourceProfiles"
         profile_id = "woon-google-calendar"
@@ -827,7 +827,7 @@ class ObsidianPluginService:
                 raise WoonError("Google incoming folder overlaps another enabled source; preserve")
         google = configuration.get("googleCalendar")
         if not isinstance(google, dict):
-            raise WoonError("Link Calendar googleCalendar must be an existing object")
+            raise WoonError("Manta Calendar googleCalendar must be an existing object")
         selections = google.get("sourceProfileIds", [])
         if not isinstance(selections, list) or not all(isinstance(p, str) for p in selections):
             raise WoonError("Google Calendar sourceProfileIds must be a list of strings")
@@ -1008,7 +1008,7 @@ class ObsidianPluginService:
         self, configuration: dict[str, Any], before: bytes, receipt: dict[str, Any]
     ) -> dict[str, Any]:
         return self._write_plugin_settings(
-            LINK_CALENDAR_ID, configuration, before, receipt, label="Link Calendar settings"
+            LINK_CALENDAR_ID, configuration, before, receipt, label="Manta Calendar settings"
         )
 
     def _write_plugin_settings(
@@ -1087,7 +1087,7 @@ class ObsidianPluginService:
             if len(checks) != len(provided):
                 detail.append("duplicate-check")
             raise WoonError(
-                "Link Calendar manual runtime attestation requires the complete UI checklist"
+                "Manta Calendar manual runtime attestation requires the complete UI checklist"
                 + (": " + "; ".join(detail) if detail else "")
             )
 
@@ -1365,7 +1365,7 @@ class ObsidianPluginService:
             attestation_checks=LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS,
         ):
             raise WoonError(
-                "Link Calendar runtime must have a manual operator attestation after reload"
+                "Manta Calendar runtime must have a manual operator attestation after reload"
             )
 
     def _require_linked_graph_ready(self) -> None:
@@ -1373,9 +1373,9 @@ class ObsidianPluginService:
 
         manifest = self._installed_manifest(LINKED_GRAPH_ID)
         if manifest["version"] != LINKED_GRAPH_VERSION:
-            raise WoonError("Linked Graph version is not approved for legacy retirement")
+            raise WoonError("Manta Graph version is not approved for legacy retirement")
         if LINKED_GRAPH_ID not in self._enabled_ids():
-            raise WoonError("Linked Graph must be enabled before retiring Context Graph")
+            raise WoonError("Manta Graph must be enabled before retiring Context Graph")
         self._require_verified_local_build(LINKED_GRAPH_ID, LINKED_GRAPH_VERSION)
 
     def _link_calendar_static_evidence(self) -> tuple[dict[str, str], str, str]:
@@ -1383,11 +1383,11 @@ class ObsidianPluginService:
 
         manifest = self._installed_manifest(LINK_CALENDAR_ID)
         if LINK_CALENDAR_ID not in self._enabled_ids():
-            raise WoonError("Link Calendar must be enabled before retiring the legacy plugin")
+            raise WoonError("Manta Calendar must be enabled before retiring the legacy plugin")
         version = manifest["version"]
         asset_hashes = self._require_verified_local_build(LINK_CALENDAR_ID, version)
         settings_path = self._plugins / LINK_CALENDAR_ID / "data.json"
-        _require_vault_local_file(self._vault, settings_path, "Link Calendar settings")
+        _require_vault_local_file(self._vault, settings_path, "Manta Calendar settings")
         self._read_json_object(settings_path)
         settings_hash = _sha256(settings_path.read_bytes())
         return asset_hashes, settings_hash, version
