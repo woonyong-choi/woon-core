@@ -13,11 +13,13 @@ from zoneinfo import ZoneInfo
 import yaml
 from pypdf import PdfReader
 
+from woon_core.career.evidence import CareerEvidence, digest, wiki_path
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write, exclusive_file_lock
 from woon_core.knowledge.context_bundle import ContextBundle, build_context_bundle
 from woon_core.knowledge.factory import build_knowledge_service
 from woon_core.knowledge.service import KnowledgeService
+from woon_core.knowledge.source_boundary import private_source_relative
 
 APPLICATION_ID = re.compile(r"^[a-z0-9][a-z0-9-]{2,80}$")
 STATES = (
@@ -36,7 +38,7 @@ STATES = (
 )
 TERMINAL_STATES = {"offer", "rejected", "withdrawn", "closed"}
 CLASSIFICATIONS = {"verified", "adjacent", "gap"}
-OWNERSHIP_SCOPES = {"personal", "team", "mixed", "unknown"}
+OWNERSHIP_SCOPES = {"personal", "team", "mixed", "post_project", "unknown"}
 JD_SUFFIXES = {".md", ".txt", ".yaml", ".yml", ".json", ".pdf"}
 STATE_LABELS = {
     "discovered": "검토 시작",
@@ -61,6 +63,7 @@ OWNERSHIP_LABELS = {
     "personal": "개인 기여",
     "team": "팀 성과",
     "mixed": "개인·팀 혼합",
+    "post_project": "종료 후 개인 확장",
     "unknown": "미확인",
 }
 ARTIFACT_LABELS = {"draft": "초안", "submitted": "실제 제출본"}
@@ -78,14 +81,26 @@ class CareerResult:
 class CareerApplicationService:
     """Own application state while keeping JD/PDF files as immutable sources."""
 
-    def __init__(self, vault: Path, knowledge: KnowledgeService | None = None) -> None:
+    def __init__(
+        self,
+        vault: Path,
+        knowledge: KnowledgeService | None = None,
+        *,
+        repositories: dict[str, Path] | None = None,
+    ) -> None:
         self._vault = vault.expanduser().resolve()
         self._knowledge = knowledge
         self._wiki_root = self._vault / "wiki/personal/career/applications"
-        self._source_root = (
-            self._vault / "wiki/private/_sources/knowledge/private/career/applications"
+        self._source_root = self._vault / private_source_relative(
+            self._vault,
+            "knowledge",
+            "private",
+            "career",
+            "applications",
         )
         self._lock = self._vault / ".local/woon-knowledge/career-pipeline.lock"
+        self._evidence = CareerEvidence(self._vault, repositories)
+        self._loaded_revisions: dict[Path, str] = {}
 
     def create(
         self,
@@ -107,10 +122,7 @@ class CareerApplicationService:
             raise WoonError("career JD must be Markdown, text, YAML, JSON, or PDF")
         if not company.strip() or not role.strip():
             raise WoonError("career application company and role must not be empty")
-        source_rel = (
-            "wiki/private/_sources/knowledge/private/career/applications/"
-            f"{identifier}/jd{jd.suffix.lower()}"
-        )
+        source_rel = self._application_source_relative(identifier, f"jd{jd.suffix.lower()}")
         source = self._vault / source_rel
         now = _now()
         record: dict[str, Any] = {
@@ -130,7 +142,9 @@ class CareerApplicationService:
             "related_paths": [],
             "history": [{"at": now, "event": "지원 검토 시작", "reason": "JD 원본 보존"}],
         }
-        self._commit_files({source: jd.read_bytes(), page: self._render(record)})
+        self._commit_files(
+            {source: jd.read_bytes(), page: self._render(record)}, expected={page: None}
+        )
         return self._result(record, changed=True)
 
     def analyze(self, application_id: str, *, max_requirements: int = 12) -> CareerResult:
@@ -168,7 +182,7 @@ class CareerApplicationService:
         return self._save(record)
 
     def evaluate(self, application_id: str, matrix: list[dict[str, object]]) -> CareerResult:
-        """Store a reviewed requirement matrix whose evidence resolves to Wiki files."""
+        """Store reviewed file/section evidence; structural checks never establish authorship."""
 
         if not matrix:
             raise WoonError("career evaluation matrix must not be empty")
@@ -197,6 +211,15 @@ class CareerApplicationService:
             ):
                 raise WoonError("career evidence_paths must be a list of Wiki paths")
             paths = [self._evidence_path(path) for path in raw_paths]
+            raw_refs = item.get("evidence_refs", [])
+            if not isinstance(raw_refs, list) or not all(isinstance(ref, dict) for ref in raw_refs):
+                raise WoonError("career evidence_refs must be a list of section references")
+            refs = [self._evidence.validate(ref) for ref in raw_refs]
+            if len({(ref["canonical_id"], ref["section"]) for ref in refs}) != len(refs):
+                raise WoonError("career requirement contains duplicate evidence sections")
+            paths = list(
+                dict.fromkeys([*paths, *(f"wiki/{ref['canonical_id']}.md" for ref in refs)])
+            )
             if classification == "verified" and not paths:
                 raise WoonError("verified career requirements need at least one Wiki evidence path")
             if classification == "verified" and ownership == "unknown":
@@ -211,14 +234,221 @@ class CareerApplicationService:
                     "reviewed": True,
                 }
             )
+            if refs:
+                normalized[-1]["evidence_refs"] = refs
         if record.get("requirements") == normalized:
-            return self._save(record)
+            return self._result(record, changed=False)
         record["requirements"] = normalized
         if record["application_state"] in {"discovered", "evaluated"}:
             self._transition(record, "evaluated", "사람이 요구사항별 근거와 공백을 검토")
         else:
             self._event(record, "JD와 경력 근거 재검토", "지원 단계는 유지하고 근거표만 갱신")
         return self._save(record)
+
+    def evidence(self, spec: dict[str, Any]) -> dict[str, Any]:
+        """Capture current canonical section/code pins without storing or verifying a claim."""
+        return self._evidence.capture(spec)
+
+    def compose(self, application_id: str, selections: list[dict[str, Any]]) -> CareerResult:
+        """Persist selection order and bounded draft wording in the existing application."""
+        record = self._load(application_id)
+        self._require_state(
+            record, {"evaluated", "approved_for_draft", "drafted", "reviewed"}, "career composition"
+        )
+        if not selections:
+            raise WoonError("career composition needs at least one reviewed selection")
+        normalized: list[dict[str, Any]] = []
+        identities: set[tuple[str, str]] = set()
+        for selection in selections:
+            item, ref = self._selection_source(record, selection)
+            if (
+                item.get("reviewed") is not True
+                or item.get("classification") == "gap"
+                or item.get("ownership") == "unknown"
+            ):
+                raise WoonError("career selection needs reviewed, known contribution evidence")
+            if self._evidence.inspect(ref)["state"] != "current":
+                raise WoonError("career selection evidence changed; re-evaluate before composing")
+            identity = (str(ref["canonical_id"]), str(ref["section"]))
+            if identity in identities:
+                raise WoonError("career composition contains a duplicate contribution section")
+            identities.add(identity)
+            text = str(selection.get("text", "")).strip()
+            limits = str(selection.get("limitations", "")).strip()
+            max_chars = selection.get("max_chars")
+            if (
+                not text
+                or not limits
+                or type(max_chars) is not int
+                or not 1 <= max_chars <= 8000
+                or len(text) + len(limits) > max_chars
+            ):
+                raise WoonError("career wording and limitations must fit the explicit max_chars")
+            normalized.append(
+                {
+                    "requirement": item["requirement"],
+                    "canonical_id": ref["canonical_id"],
+                    "section": ref["section"],
+                    "text": text,
+                    "limitations": limits,
+                    "max_chars": max_chars,
+                    "evidence_ref": ref,
+                    "basis_sha256": self._selection_basis(item, ref),
+                }
+            )
+        composition = {"selections": normalized, "sha256": digest(normalized)}
+        if record.get("composition") == composition:
+            return self._result(record, changed=False)
+        record["composition"] = composition
+        self._event(
+            record, "지원 초안 조합 갱신", "검토한 기여의 선택·순서·분량을 조합; 제출본은 보존"
+        )
+        return self._save(record)
+
+    def impact(self, application_ids: list[str] | None = None) -> list[dict[str, Any]]:
+        """Read only affected compositions; never mutate evidence, PDFs or lifecycle state."""
+        identifiers = (
+            application_ids
+            if application_ids is not None
+            else sorted(path.stem for path in self._wiki_root.glob("*.md"))
+        )
+        affected = []
+        for identifier in dict.fromkeys(identifiers):
+            record = self._load(identifier)
+            changes = self._composition_changes(record)
+            if changes:
+                affected.append(
+                    {
+                        "application_id": identifier,
+                        "state": record["application_state"],
+                        "requires_review": any(item["blocking"] for item in changes),
+                        "changes": changes,
+                    }
+                )
+        return affected
+
+    def draft(self, application_id: str) -> dict[str, Any]:
+        """Return a private preparation draft; this neither creates a PDF nor submits it."""
+        record = self._load(application_id)
+        self._require_state(
+            record,
+            {"approved_for_draft", "drafted", "reviewed", "ready"},
+            "career draft preparation",
+        )
+        self._require_current_composition(record, required=True)
+        lines = [
+            f"# {record['company']} {record['role']} 초안",
+            "",
+            "> 검토용 초안. 근거 연결 검사는 문장 의미·개인 저자성 검토를 대신하지 않는다.",
+            "",
+        ]
+        sources = []
+        for selection in record["composition"]["selections"]:
+            item, ref = self._selection_source(record, selection)
+            current = self._evidence.inspect(ref, include_excerpt=True)
+            if current["state"] != "current":
+                raise WoonError("career evidence changed while preparing the draft")
+            lines.extend(
+                [
+                    f"## {selection['section']}",
+                    "",
+                    selection["text"],
+                    "",
+                    f"- 기여 범위: {OWNERSHIP_LABELS[item['ownership']]}",
+                    f"- JD 대조: {CLASSIFICATION_LABELS[item['classification']]} · "
+                    f"{item['requirement']}",
+                    f"- 한계: {selection['limitations']}",
+                    f"- 검토 이유: {item['rationale']}",
+                    f"- 근거: [[wiki/{ref['canonical_id']}#{ref['section']}]]",
+                    "",
+                ]
+            )
+            sources.append(
+                {
+                    **ref,
+                    "current_revision": current["current_revision"],
+                    "excerpt": current["excerpt"],
+                    "checkout": current["checkout"],
+                }
+            )
+            if any(code.get("scope") == "historical" for code in ref["code_refs"]):
+                lines.extend(
+                    [
+                        "- 코드 범위: 과거 commit의 기여 근거다. 현재 서비스 기능을 뜻하지 않는다.",
+                        "",
+                    ]
+                )
+        return {
+            "application_id": application_id,
+            "status": "draft-preparation",
+            "composition_sha256": record["composition"]["sha256"],
+            "visibility": "private-local-only",
+            "markdown": "\n".join(lines),
+            "evidence": sources,
+            "submitted": False,
+        }
+
+    def _selection_source(
+        self,
+        record: dict[str, Any],
+        selection: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        matches = [
+            item
+            for item in record.get("requirements", [])
+            if item.get("requirement") == selection.get("requirement")
+        ]
+        if len(matches) != 1:
+            raise WoonError("career selection must identify one reviewed JD requirement")
+        refs = [
+            ref
+            for ref in matches[0].get("evidence_refs", [])
+            if (ref.get("canonical_id"), ref.get("section"))
+            == (selection.get("canonical_id"), selection.get("section"))
+        ]
+        if len(refs) != 1:
+            raise WoonError("career selection needs a revision-pinned canonical section")
+        return matches[0], refs[0]
+
+    def _selection_basis(self, item: dict[str, Any], ref: dict[str, Any]) -> str:
+        return digest(
+            {
+                key: item.get(key)
+                for key in ("requirement", "classification", "ownership", "rationale", "reviewed")
+            }
+            | {"evidence_ref": ref}
+        )
+
+    def _composition_changes(self, record: dict[str, Any]) -> list[dict[str, Any]]:
+        changes = []
+        for index, selection in enumerate(record.get("composition", {}).get("selections", [])):
+            try:
+                item, ref = self._selection_source(record, selection)
+                if self._selection_basis(item, ref) != selection["basis_sha256"]:
+                    status = {"state": "changed", "reason": "reviewed requirement/evidence changed"}
+                else:
+                    status = self._evidence.inspect(selection["evidence_ref"])
+            except WoonError as error:
+                status = {"state": "unavailable", "reason": str(error)}
+            if status["state"] != "current" or status.get("code_updates"):
+                changes.append(
+                    {
+                        "selection": index,
+                        "canonical_id": selection["canonical_id"],
+                        "section": selection["section"],
+                        "blocking": status["state"] != "current",
+                        **status,
+                    }
+                )
+        return changes
+
+    def _require_current_composition(
+        self, record: dict[str, Any], *, required: bool = False
+    ) -> None:
+        if required and not record.get("composition"):
+            raise WoonError("career draft preparation requires a selected composition")
+        if any(item["blocking"] for item in self._composition_changes(record)):
+            raise WoonError("career composition is stale; inspect impact and re-evaluate/recompose")
 
     def approve_draft(self, application_id: str, *, confirmed: bool) -> CareerResult:
         if not confirmed:
@@ -229,6 +459,7 @@ class CareerApplicationService:
         requirements = record.get("requirements", [])
         if not requirements or not all(item.get("reviewed") is True for item in requirements):
             raise WoonError("career draft approval requires a fully reviewed requirement matrix")
+        self._require_current_composition(record)
         self._transition(record, "approved_for_draft", "사용자가 지원 문서 작성 범위를 승인")
         return self._save(record)
 
@@ -256,12 +487,13 @@ class CareerApplicationService:
         state = str(record["application_state"])
         if kind == "draft" and state not in {"approved_for_draft", "drafted", "reviewed"}:
             raise WoonError("draft PDF requires approved_for_draft, drafted, or reviewed state")
-        if kind == "submitted" and (not confirmed or state != "ready"):
+        if kind == "submitted" and (not confirmed or state not in {"ready", "submitted"}):
             raise WoonError("submitted PDF requires ready state and explicit confirmation")
+        if state != "submitted":
+            self._require_current_composition(record)
         digest = _sha256(pdf.read_bytes())
-        source_rel = (
-            f"wiki/private/_sources/knowledge/private/career/applications/{record['application_id']}/"
-            f"{kind}-{digest[:12]}.pdf"
+        source_rel = self._application_source_relative(
+            str(record["application_id"]), f"{kind}-{digest[:12]}.pdf"
         )
         source = self._vault / source_rel
         artifacts = list(record.get("artifacts", []))
@@ -274,10 +506,27 @@ class CareerApplicationService:
             None,
         )
         if existing is not None and (
-            (kind == "draft" and state == "drafted")
+            (
+                kind == "draft"
+                and state == "drafted"
+                and existing.get("composition_sha256")
+                == record.get("composition", {}).get("sha256")
+            )
             or (kind == "submitted" and state == "submitted")
         ):
             return self._result(record, changed=False)
+        if kind == "submitted" and state != "ready":
+            raise WoonError("an existing submitted PDF cannot be replaced")
+        if kind == "submitted" and record.get("composition"):
+            drafts = [item for item in artifacts if item.get("kind") == "draft"]
+            if (
+                not drafts
+                or drafts[-1]["sha256"] != digest
+                or drafts[-1].get("composition_sha256") != record["composition"]["sha256"]
+            ):
+                raise WoonError("submitted PDF must match the reviewed current composition draft")
+        if source.exists() and source.read_bytes() != pdf.read_bytes():
+            raise WoonError("immutable career PDF source already contains different bytes")
         artifacts.append(
             {
                 "kind": kind,
@@ -287,6 +536,8 @@ class CareerApplicationService:
                 "recorded_at": _now(),
             }
         )
+        if record.get("composition"):
+            artifacts[-1]["composition_sha256"] = record["composition"]["sha256"]
         record["artifacts"] = artifacts
         self._transition(
             record,
@@ -297,7 +548,8 @@ class CareerApplicationService:
             {
                 source: pdf.read_bytes(),
                 self._page_path(str(record["application_id"])): self._render(record),
-            }
+            },
+            expected=self._record_precondition(record),
         )
         return self._result(record, changed=True)
 
@@ -307,6 +559,14 @@ class CareerApplicationService:
         record = self._load(application_id)
         if record["application_state"] != "drafted":
             raise WoonError("career review requires drafted state")
+        self._require_current_composition(record)
+        if record.get("composition"):
+            drafts = [item for item in record["artifacts"] if item.get("kind") == "draft"]
+            if (
+                not drafts
+                or drafts[-1].get("composition_sha256") != record["composition"]["sha256"]
+            ):
+                raise WoonError("career review requires a PDF for the current composition")
         self._transition(record, "reviewed", "사용자가 PDF 초안의 내용과 표현을 검토")
         return self._save(record)
 
@@ -316,6 +576,7 @@ class CareerApplicationService:
         record = self._load(application_id)
         if record["application_state"] != "reviewed":
             raise WoonError("career ready transition requires reviewed state")
+        self._require_current_composition(record)
         self._transition(record, "ready", "사용자가 제출 가능한 최종본으로 승인")
         return self._save(record)
 
@@ -408,7 +669,8 @@ class CareerApplicationService:
         page = self._page_path(self._identifier(application_id))
         if not page.is_file():
             raise WoonError(f"career application not found: {application_id}")
-        text = page.read_text(encoding="utf-8")
+        raw_bytes = page.read_bytes()
+        text = raw_bytes.decode("utf-8").replace("\r\n", "\n")
         if not text.startswith("---\n") or "\n---\n" not in text[4:]:
             raise WoonError(f"career application frontmatter is invalid: {application_id}")
         frontmatter = text.split("\n---\n", 1)[0][4:]
@@ -419,6 +681,7 @@ class CareerApplicationService:
         if not isinstance(record, dict) or record.get("application_id") != application_id:
             raise WoonError(f"career application identity mismatch: {application_id}")
         self._validate_record(record)
+        self._loaded_revisions[page] = _sha256(raw_bytes)
         return record
 
     def _validate_record(self, record: dict[str, Any]) -> None:
@@ -427,12 +690,39 @@ class CareerApplicationService:
         for field in ("company", "role", "application_state", "jd_source", "jd_sha256"):
             if not isinstance(record.get(field), str) or not str(record[field]).strip():
                 raise WoonError(f"career application requires non-empty {field}")
+        if "display_role" in record and (
+            not isinstance(record["display_role"], str) or not record["display_role"].strip()
+        ):
+            raise WoonError("career application display_role must be non-empty text")
         if record["application_state"] not in STATES:
             raise WoonError(f"unknown career state: {record['application_state']}")
-        expected_prefix = (
-            "wiki/private/_sources/knowledge/private/career/applications/"
-            f"{record['application_id']}/"
-        )
+        composition = record.get("composition")
+        if composition is not None:
+            if (
+                not isinstance(composition, dict)
+                or not isinstance(composition.get("selections"), list)
+                or not composition["selections"]
+                or composition.get("sha256") != digest(composition["selections"])
+            ):
+                raise WoonError("career composition integrity is invalid")
+            for selection in composition["selections"]:
+                if (
+                    not isinstance(selection, dict)
+                    or not all(
+                        isinstance(selection.get(key), str)
+                        for key in (
+                            "requirement",
+                            "canonical_id",
+                            "section",
+                            "text",
+                            "limitations",
+                            "basis_sha256",
+                        )
+                    )
+                    or not isinstance(selection.get("evidence_ref"), dict)
+                ):
+                    raise WoonError("career composition selection is invalid")
+        expected_prefix = f"{self._application_source_relative(str(record['application_id']))}/"
         source_fields = [(str(record["jd_source"]), str(record["jd_sha256"]))]
         for collection in ("requirements", "artifacts", "history"):
             if not isinstance(record.get(collection), list):
@@ -479,8 +769,12 @@ class CareerApplicationService:
         content = self._render(record)
         if before == content:
             return self._result(record, changed=False)
-        self._commit_files({page: content})
+        self._commit_files({page: content}, expected=self._record_precondition(record))
         return self._result(record, changed=True)
+
+    def _record_precondition(self, record: dict[str, Any]) -> dict[Path, str | None]:
+        path = self._page_path(str(record["application_id"]))
+        return {path: self._loaded_revisions.get(path)}
 
     def _transition(
         self,
@@ -532,10 +826,7 @@ class CareerApplicationService:
 
     def _evidence_path(self, value: str) -> str:
         path = value.strip().replace("\\", "/")
-        if not path.startswith("wiki/") or not path.endswith(".md") or ".." in Path(path).parts:
-            raise WoonError(f"career evidence must be an existing wiki Markdown path: {value}")
-        if not (self._vault / path).is_file():
-            raise WoonError(f"career evidence does not exist: {path}")
+        wiki_path(self._vault, path)
         return path
 
     def _related_link(self, value: str) -> str:
@@ -578,7 +869,21 @@ class CareerApplicationService:
         return normalized
 
     def _page_path(self, application_id: str) -> Path:
-        return self._wiki_root / f"{application_id}.md"
+        path = self._wiki_root / f"{application_id}.md"
+        if not path.resolve().is_relative_to(self._vault / "wiki") or path.is_symlink():
+            raise WoonError("career application path escapes its canonical root")
+        return path
+
+    def _application_source_relative(self, application_id: str, *parts: str) -> str:
+        return private_source_relative(
+            self._vault,
+            "knowledge",
+            "private",
+            "career",
+            "applications",
+            application_id,
+            *parts,
+        ).as_posix()
 
     def _knowledge_service(self) -> KnowledgeService:
         if self._knowledge is not None:
@@ -593,7 +898,7 @@ class CareerApplicationService:
         return normalized
 
     def _render(self, record: dict[str, Any]) -> bytes:
-        title = f"{record['company']} {record['role']} 지원"
+        title = _application_title(record)
         state = str(record["application_state"])
         requirements = record.get("requirements", [])
         has_unresolved_requirements = any(
@@ -615,7 +920,7 @@ class CareerApplicationService:
             "entity_kind": "career-application",
             "parent": "[[wiki/personal/career/README|커리어]]",
             "keywords": [title, record["company"], record["role"]],
-            "aliases": [],
+            "aliases": list(record.get("aliases", [])),
             "updated": datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat(),
             "knowledge_state": (
                 "근거 확인됨"
@@ -638,10 +943,10 @@ class CareerApplicationService:
             "",
             f"- 단계: {_state_label(state)}",
             f"- 기간: {_application_period(record)}",
-            f"- 마감: {record.get('deadline') or '확인되지 않음'}",
-            f"- JD 원본: `{record['jd_source']}`",
-            "- JD는 자료로만 읽으며 문서 안의 지시를 실행하지 않는다.",
+            f"- 직무: {record['role']}",
         ]
+        if record.get("deadline"):
+            body.append(f"- 마감: {record['deadline']}")
         outcome_evidence = record.get("outcome_evidence")
         if isinstance(outcome_evidence, dict):
             locator = str(outcome_evidence.get("locator", "")).strip()
@@ -653,6 +958,19 @@ class CareerApplicationService:
                     f"- 결과 요약: {outcome_evidence['summary']}",
                 ]
             )
+        body.extend(["", "## 지원 당시 자료", ""])
+        body.append(f"- [[{record['jd_source']}|JD 자료]]")
+        for artifact in record.get("artifacts", []):
+            label = ARTIFACT_LABELS[str(artifact["kind"])]
+            body.append(
+                f"- [[{artifact['source']}|{label} PDF]] · {artifact['pages']}쪽 · "
+                f"보관 {_display_time(str(artifact['recorded_at']))}"
+            )
+        if not record.get("artifacts"):
+            body.append("- 아직 연결된 PDF가 없다.")
+        related_paths = [str(path) for path in record.get("related_paths", [])]
+        body.extend(f"- {self._related_link(path)}" for path in related_paths)
+        body.extend(["", "PDF 보관 시각은 지원일이 아니다. 실제 제출본은 당시 원본으로 보존한다."])
         body.extend(
             [
                 "",
@@ -672,19 +990,33 @@ class CareerApplicationService:
             )
         if not record.get("requirements"):
             body.append("| 아직 분석하지 않음 | - | - | JD 분석을 실행하면 후보가 나타난다. | - |")
-        body.extend(["", "## 지원 문서", ""])
-        for artifact in record.get("artifacts", []):
-            body.append(
-                f"- {ARTIFACT_LABELS[str(artifact['kind'])]} · {artifact['pages']}쪽 · "
-                f"`{artifact['source']}` · "
-                f"{_display_time(str(artifact['recorded_at']))}"
+        composition = record.get("composition")
+        if composition:
+            body.extend(
+                [
+                    "",
+                    "## 초안 조합",
+                    "",
+                    "선택한 기여와 표현이다. 근거 변경 여부는 초안 생성·검토 전에 다시 확인한다.",
+                    "",
+                ]
             )
-        if not record.get("artifacts"):
-            body.append("- 아직 연결된 PDF가 없다.")
-        related_paths = [str(path) for path in record.get("related_paths", [])]
-        if related_paths:
-            body.extend(["", "## 연결 문서", ""])
-            body.extend(f"- {self._related_link(path)}" for path in related_paths)
+            for index, selection in enumerate(composition["selections"], 1):
+                ref = selection["evidence_ref"]
+                body.extend(
+                    [
+                        f"### {index}. {selection['section']}",
+                        "",
+                        selection["text"],
+                        "",
+                        f"- 한계: {selection['limitations']}",
+                        f"- 분량: 본문·한계 {selection['max_chars']}자 이내",
+                        f"- JD: {selection['requirement']}",
+                        f"- 근거: [[wiki/{ref['canonical_id']}#{ref['section']}]] · "
+                        f"`{ref['revision']}`",
+                        "",
+                    ]
+                )
         body.extend(["", "## 시간 이력", ""])
         for event in record.get("history", []):
             body.append(
@@ -694,18 +1026,25 @@ class CareerApplicationService:
         body.append("")
         return "\n".join(body).encode("utf-8")
 
-    def _commit_files(self, files: dict[Path, bytes]) -> None:
+    def _commit_files(
+        self,
+        files: dict[Path, bytes],
+        *,
+        expected: dict[Path, str | None] | None = None,
+    ) -> None:
         backups: dict[Path, bytes | None] = {}
         with exclusive_file_lock(self._lock):
+            for path, revision in (expected or {}).items():
+                actual = _sha256(path.read_bytes()) if path.exists() else None
+                if actual != revision:
+                    raise WoonError("career application revision conflict; reload before writing")
             try:
                 for path, data in files.items():
                     backups[path] = path.read_bytes() if path.exists() else None
                     atomic_write(
                         path,
                         data,
-                        mode=0o600
-                        if "wiki/private/_sources/knowledge/private" in path.as_posix()
-                        else 0o644,
+                        mode=self._file_mode(path),
                     )
             except Exception:
                 for path, previous in reversed(backups.items()):
@@ -715,11 +1054,12 @@ class CareerApplicationService:
                         atomic_write(
                             path,
                             previous,
-                            mode=0o600
-                            if "wiki/private/_sources/knowledge/private" in path.as_posix()
-                            else 0o644,
+                            mode=self._file_mode(path),
                         )
                 raise
+            for path, data in files.items():
+                if path.parent == self._wiki_root:
+                    self._loaded_revisions[path] = _sha256(data)
 
     def _result(self, record: dict[str, Any], *, changed: bool) -> CareerResult:
         identifier = str(record["application_id"])
@@ -729,6 +1069,9 @@ class CareerApplicationService:
             self._page_path(identifier).relative_to(self._vault).as_posix(),
             changed,
         )
+
+    def _file_mode(self, path: Path) -> int:
+        return 0o600 if path.resolve().is_relative_to(self._source_root) else 0o644
 
 
 def _now() -> str:
@@ -778,6 +1121,16 @@ def _iso_date(value: str, field: str) -> str:
         return date.fromisoformat(value.strip()).isoformat()
     except ValueError as error:
         raise WoonError(f"{field} must be YYYY-MM-DD") from error
+
+
+def _application_title(record: dict[str, Any]) -> str:
+    role = record.get("display_role", record["role"])
+    label = f"{record['company']} - {role}"
+    terminal = record["application_state"] in TERMINAL_STATES
+    day = record.get("ended_on") if terminal else record.get("started_on")
+    if day:
+        return f"{_iso_date(str(day), 'application display date')} - {label}"
+    return label
 
 
 def _application_period(record: dict[str, Any]) -> str:

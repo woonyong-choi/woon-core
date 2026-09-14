@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import TextIO
 
+from woon_core.career.current_jobs import CurrentJobs, current_job_sources
 from woon_core.career.service import CareerApplicationService, CareerResult
 from woon_core.errors import WoonError
 from woon_core.knowledge.factory import resolve_knowledge_vault
@@ -15,16 +17,73 @@ def run_career(arguments: list[str], output: TextIO) -> None:
     if not arguments:
         raise WoonError(
             "usage: woon career <create|analyze|evaluate|approve-draft|attach-pdf|"
-            "mark-reviewed|mark-ready|reopen|outcome|context|show>"
+            "mark-reviewed|mark-ready|reopen|outcome|context|show|evidence|compose|draft|impact|"
+            "jobs-prepare|jobs-base|jobs-sources>"
         )
     command, *options = arguments
+    if command == "jobs-sources":
+        if options:
+            raise WoonError("career jobs-sources accepts no options")
+        output.write(json.dumps(current_job_sources(), ensure_ascii=False, indent=2) + "\n")
+        return
     values, positionals = _options(options)
     vault = (
         Path(values.pop("--vault")).expanduser()
         if "--vault" in values
         else resolve_knowledge_vault()
     )
-    service = CareerApplicationService(vault)
+    repositories = None
+    if "--repositories" in values:
+        raw = _json_input(values.pop("--repositories"))
+        if not isinstance(raw, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in raw.items()
+        ):
+            raise WoonError("career repositories must map repository IDs to local roots")
+        repositories = {key: Path(value) for key, value in raw.items()}
+    if command == "jobs-prepare":
+        if positionals or set(values) != {"--spec", "--now"}:
+            raise WoonError("career jobs-prepare requires --spec and timezone-aware --now")
+        spec = _json_input(values["--spec"])
+        if not isinstance(spec, dict):
+            raise WoonError("career jobs spec must be an object")
+        try:
+            now = datetime.fromisoformat(values["--now"])
+        except ValueError as error:
+            raise WoonError("career jobs --now must be an ISO datetime") from error
+        jobs = CurrentJobs(vault, repositories).prepare(spec, now=now)
+        output.write(json.dumps(jobs, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        return
+    if command == "jobs-base":
+        if positionals or values:
+            raise WoonError("career jobs-base accepts only --vault")
+        output.write(json.dumps(CurrentJobs(vault).refresh_base(), ensure_ascii=False) + "\n")
+        return
+    service = CareerApplicationService(vault, repositories=repositories)
+    if command == "evidence":
+        if positionals or set(values) != {"--spec"}:
+            raise WoonError("career evidence requires --spec")
+        spec = _json_input(values["--spec"])
+        if not isinstance(spec, dict):
+            raise WoonError("career evidence spec must be an object")
+        output.write(json.dumps(service.evidence(spec), ensure_ascii=False, indent=2) + "\n")
+        return
+    if command == "compose":
+        _one_id(positionals, values, allowed={"--id", "--selections"}, required={"--selections"})
+        selections = _json_input(values["--selections"])
+        if not isinstance(selections, list) or not all(isinstance(x, dict) for x in selections):
+            raise WoonError("career selections must be an array of objects")
+        _result(service.compose(values["--id"], selections), output)
+        return
+    if command == "draft":
+        _one_id(positionals, values, allowed={"--id"})
+        output.write(json.dumps(service.draft(values["--id"]), ensure_ascii=False, indent=2) + "\n")
+        return
+    if command == "impact":
+        if positionals or set(values).difference({"--id"}):
+            raise WoonError("career impact accepts optional --id")
+        impacted = service.impact([values["--id"]] if "--id" in values else None)
+        output.write(json.dumps(impacted, ensure_ascii=False, indent=2) + "\n")
+        return
     if command == "create":
         required = {"--id", "--company", "--role", "--jd"}
         if (
@@ -179,6 +238,13 @@ def _options(arguments: list[str]) -> tuple[dict[str, str], list[str]]:
         values[option] = arguments[index + 1]
         index += 2
     return values, positionals
+
+
+def _json_input(value: str) -> object:
+    try:
+        return json.loads(Path(value).expanduser().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WoonError(f"career input could not be read: {error}") from error
 
 
 def _one_id(

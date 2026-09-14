@@ -20,6 +20,7 @@ def _vault(tmp_path: Path) -> Path:
     evidence = vault / "wiki/projects/kubernetes-recovery.md"
     evidence.parent.mkdir(parents=True)
     evidence.write_text("---\ntitle: Kubernetes 장애 복구 서비스\n---\n# 근거\n", encoding="utf-8")
+    (vault / "wiki/private/_sources").mkdir(parents=True)
     return vault
 
 
@@ -65,6 +66,30 @@ def test_application_uses_one_wiki_record_and_private_sources(tmp_path: Path) ->
         / "krafton-ai-engineer-2026/jd.md"
     ).read_bytes() == jd.read_bytes()
     assert not list((vault / ".local").rglob("*.json"))
+
+
+def test_application_uses_target_private_source_layout_after_migration(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    (vault / "wiki/private/_sources").rmdir()
+    (vault / "private").mkdir()
+    jd = tmp_path / "jd.md"
+    jd.write_text("# 요구사항\n- Kubernetes 운영 자동화 경험\n", encoding="utf-8")
+
+    created = CareerApplicationService(vault).create(
+        application_id="krafton-ai-engineer-2026",
+        company="KRAFTON",
+        role="AI Engineer",
+        jd_path=jd,
+    )
+
+    expected = (
+        vault / "private/knowledge/private/career/applications/krafton-ai-engineer-2026/jd.md"
+    )
+    assert expected.read_bytes() == jd.read_bytes()
+    assert expected.stat().st_mode & 0o777 == 0o600
+    assert "private/knowledge/private/career/applications/krafton-ai-engineer-2026/jd.md" in (
+        vault / created.relative_path
+    ).read_text(encoding="utf-8")
 
 
 def test_application_requires_reviewed_evidence_before_drafting(tmp_path: Path) -> None:
@@ -220,7 +245,7 @@ def test_terminal_outcome_records_date_evidence_and_related_documents(tmp_path: 
     assert result.state == "rejected"
     assert "lifecycle_status: completed" in rendered
     assert "ended_on: '2026-08-27'" in rendered
-    assert "- KRAFTON AI Engineer 지원" in rendered
+    assert "# 2026-08-27 - KRAFTON - AI Engineer" in rendered
     assert "기간: 2026-" in rendered and "→ 2026-08-27" in rendered
     assert "[KRAFTON] 직무면접 결과 안내드립니다." in rendered
     assert "[[wiki/projects/kubernetes-recovery|Kubernetes 장애 복구 서비스]]" in rendered

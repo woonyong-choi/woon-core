@@ -1,0 +1,11 @@
+schema_version: 1
+scope: initial-official-company-lists
+sources:
+  - source_id: daangn-careers
+    company: 당근
+    list_url: https://careers.daangn.com/jobs/
+    company_basis_url: https://www.yna.co.kr/view/AKR20210818027400017
+  - source_id: pearl-abyss-careers
+    company: 펄어비스
+    list_url: https://www.pearlabyss.com/ko-KR/Company/Careers/List
+    company_basis_url: https://www.pearlabyss.com/en-US/IR/Stock
