@@ -2772,8 +2772,6 @@ def _is_root_direct_book_section(
 def _compact_keyword_label(value: str) -> str:
     label = value.split(" — ", maxsplit=1)[0].strip()
     label = re.sub(r"\s+\([A-Za-z][A-Za-z0-9 .+/#-]*\)$", "", label).strip()
-    if label.endswith(" 탐색"):
-        label = label.removesuffix(" 탐색").rstrip()
     return label
 
 

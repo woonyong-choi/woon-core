@@ -1204,6 +1204,33 @@ def test_root_and_hub_render_only_direct_keyword_links(tmp_path: Path) -> None:
     assert "## 최신 하위 문서" not in hub
 
 
+def test_navigation_link_keeps_canonical_exploration_title(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/evernote.md",
+        title="Evernote 공개 노트 읽기와 탐색",
+        canonical_id="evernote",
+        node_kind="topic",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("Evernote 공개 노트 읽기와 탐색",),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+    rendered = report.pages[tmp_path / "wiki/README.md"].decode("utf-8")
+
+    assert report.issues == ()
+    assert "[[wiki/evernote|Evernote 공개 노트 읽기와 탐색]]" in rendered
+
+
 def test_book_chapter_shows_only_direct_toc_depth_without_latest_descendants(
     tmp_path: Path,
 ) -> None:
