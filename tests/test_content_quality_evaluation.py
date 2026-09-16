@@ -313,6 +313,33 @@ def test_fails_for_missing_and_stale_reviews(tmp_path: Path) -> None:
     assert any("missing" in error for error in result["errors"])
 
 
+@pytest.mark.parametrize("issue", ["missing", "stale", "extra", "changed-bytes"])
+def test_scoped_evaluation_keeps_coverage_and_revision_checks(tmp_path: Path, issue: str) -> None:
+    _write_catalogs(tmp_path)
+    reviews = tmp_path / "reviews.json"
+    standard, prompt = tmp_path / "standard.md", tmp_path / "prompt.md"
+    entries = (
+        []
+        if issue == "missing"
+        else [_review("os/first", "f" * 64 if issue == "stale" else _digest(FIRST))]
+    )
+    if issue == "extra":
+        entries.append(_review("os/second", _digest(SECOND)))
+    _write_reviews(reviews, standard, prompt, entries)
+    payload = json.loads(reviews.read_text())
+    payload["page_ids"] = ["os/first"]
+    reviews.write_text(json.dumps(payload))
+    if issue == "changed-bytes":
+        (tmp_path / "wiki/os/first.md").write_text(FIRST + "\nLater edit.\n")
+        with pytest.raises(WoonError, match="bytes do not match receipt"):
+            evaluate_content_quality(tmp_path, reviews, standard, prompt, ("os/first",))
+    else:
+        result = evaluate_content_quality(tmp_path, reviews, standard, prompt, ("os/first",))
+        assert result["passed"] is False
+        expected = "out-of-scope" if issue == "extra" else issue
+        assert any(expected in error for error in result["errors"])
+
+
 def test_fails_when_review_prompt_is_stale(tmp_path: Path) -> None:
     _write_catalogs(tmp_path)
     reviews = tmp_path / "reviews.json"

@@ -260,11 +260,11 @@ Usage:
   woon knowledge evaluate-answers --cases <path> --answers <path>
     [--output <path>] [--vault <path>]
   woon knowledge evaluate-quality --reviews <path> --standard <path> --prompt <path>
-    [--output <path>] [--vault <path>]
+    [--page-id <id>...] [--output <path>] [--vault <path>]
   woon knowledge quality-review-plan --standard <path> --prompt <path> --output <directory>
     [--batch-size <1..64>] [--max-batch-chars <4000..200000>]
     [--standard-uri <repo-uri>] [--prompt-uri <repo-uri>]
-    [--vault <path>]
+    [--page-id <id>...] [--vault <path>]
   woon knowledge rebase-quality-review-plan --prior-plan <path> --prior-results <directory>
     --standard <path> --prompt <path> --output <directory> --results <directory>
     [--batch-size <1..64>] [--max-batch-chars <4000..200000>]
@@ -3322,9 +3322,16 @@ def _run_answer_citation_evaluation(arguments: list[str], output: TextIO) -> Non
 
 def _run_content_quality_evaluation(arguments: list[str], output: TextIO) -> None:
     values: dict[str, str] = {}
+    page_ids: list[str] = []
     index = 0
     while index < len(arguments):
         option = arguments[index]
+        if option == "--page-id":
+            if index + 1 >= len(arguments):
+                raise WoonError("--page-id requires a value")
+            page_ids.append(arguments[index + 1])
+            index += 2
+            continue
         if option not in {"--vault", "--reviews", "--standard", "--prompt", "--output"}:
             raise WoonError(f"unexpected knowledge evaluate-quality argument: {option}")
         if index + 1 >= len(arguments) or option in values:
@@ -3339,6 +3346,7 @@ def _run_content_quality_evaluation(arguments: list[str], output: TextIO) -> Non
         Path(values["--reviews"]).expanduser().resolve(),
         Path(values["--standard"]).expanduser().resolve(),
         Path(values["--prompt"]).expanduser().resolve(),
+        tuple(page_ids),
     )
     rendered = json.dumps(result, ensure_ascii=False, indent=2)
     if "--output" in values:
@@ -3352,9 +3360,16 @@ def _run_content_quality_evaluation(arguments: list[str], output: TextIO) -> Non
 
 def _run_content_quality_review_plan(arguments: list[str], output: TextIO) -> None:
     values: dict[str, str] = {}
+    page_ids: list[str] = []
     index = 0
     while index < len(arguments):
         option = arguments[index]
+        if option == "--page-id":
+            if index + 1 >= len(arguments):
+                raise WoonError("--page-id requires a value")
+            page_ids.append(arguments[index + 1])
+            index += 2
+            continue
         if option not in {
             "--vault",
             "--standard",
@@ -3384,6 +3399,7 @@ def _run_content_quality_review_plan(arguments: list[str], output: TextIO) -> No
         Path(values["--output"]).expanduser().resolve(),
         batch_size,
         max_batch_chars,
+        tuple(page_ids),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
 

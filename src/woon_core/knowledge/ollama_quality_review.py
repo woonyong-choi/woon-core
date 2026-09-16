@@ -21,6 +21,7 @@ from woon_core.knowledge.content_quality_evaluation import (
     review_verdict_consistency_error,
     validate_criterion_evidence,
 )
+from woon_core.knowledge.content_quality_scope import quality_review_page_ids
 
 PLAN_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 600
@@ -553,6 +554,15 @@ def _load_plan(path: Path) -> dict[str, Any]:
     plan = _load_json(path, "quality review plan")
     if plan.get("version") != PLAN_VERSION or not isinstance(plan.get("batches"), list):
         raise WoonError("quality review plan has unsupported version or batches")
+    page_ids = quality_review_page_ids(plan.get("page_ids", ()))
+    if page_ids:
+        planned = [
+            page_id
+            for batch in _selected_batches(plan, ())
+            for page_id in _target_hashes(batch.get("targets"), batch["batch_id"])
+        ]
+        if sorted(planned) != list(page_ids):
+            raise WoonError("quality review plan batches do not match selected page scope")
     return plan
 
 

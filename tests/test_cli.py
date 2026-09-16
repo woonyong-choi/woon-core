@@ -2077,7 +2077,11 @@ def test_knowledge_evaluate_quality_uses_explicit_review_path(
     captured: dict[str, Path] = {}
 
     def fake_evaluate(
-        actual_vault: Path, actual_reviews: Path, actual_standard: Path, actual_prompt: Path
+        actual_vault: Path,
+        actual_reviews: Path,
+        actual_standard: Path,
+        actual_prompt: Path,
+        page_ids: tuple[str, ...] = (),
     ) -> dict[str, object]:
         captured["vault"] = actual_vault
         captured["reviews"] = actual_reviews
@@ -2164,6 +2168,7 @@ def test_quality_review_plan_uses_immutable_input_paths(
         output_dir.resolve(),
         4,
         12000,
+        (),
     )
     assert '"compiled_pages": 2' in output.getvalue()
 
@@ -2202,7 +2207,7 @@ def test_quality_review_plan_defaults_to_one_page_per_batch(
         StringIO(),
     )
 
-    assert captured["arguments"][-2:] == (1, 24_000)
+    assert captured["arguments"][-3:] == (1, 24_000, ())
 
 
 def test_quality_review_assembly_uses_explicit_evaluator_identity(

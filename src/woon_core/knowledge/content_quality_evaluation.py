@@ -25,6 +25,7 @@ from woon_core.knowledge.content_quality_scope import (
     SOURCE_INDEX_REASON,
     book_reader_roots,
     content_quality_exclusion_reason,
+    quality_review_page_ids,
 )
 
 RUBRIC = {
@@ -47,21 +48,37 @@ RUBRIC_EVIDENCE_TERMS = {
 
 
 def evaluate_content_quality(
-    vault: Path, reviews_path: Path, standard_path: Path, prompt_path: Path
+    vault: Path,
+    reviews_path: Path,
+    standard_path: Path,
+    prompt_path: Path,
+    page_ids: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Validate semantic quality reviews against the exact compiled output.
 
     The review payload is provider-neutral so a human, local LLM, or hosted LLM
     can use the same acceptance boundary.  A structural match alone cannot
-    pass: every current page needs a passed review with all rubric dimensions.
+    pass: every current page in the explicitly requested scope needs a passed
+    review with all rubric dimensions. No selection retains the full-corpus gate.
     """
 
-    all_compiled = _compiled_pages(vault)
-    expected, exclusions = _review_scope(vault, all_compiled)
-    markdown_by_page = _compiled_markdown(vault, expected)
+    page_ids = quality_review_page_ids(page_ids)
     payload = _load_object(reviews_path, "content quality review")
     if payload.get("version") != 1:
         raise WoonError("content quality review version must be 1")
+    if quality_review_page_ids(payload.get("page_ids", ())) != page_ids:
+        raise WoonError("content quality review scope does not match explicitly requested pages")
+    all_compiled = _compiled_pages(vault)
+    expected, exclusions = _review_scope(vault, all_compiled)
+    if page_ids:
+        unavailable = sorted(set(page_ids).difference(expected))
+        if unavailable:
+            raise WoonError(
+                "quality review selected pages are unknown or excluded: " + ",".join(unavailable)
+            )
+        expected = {page_id: expected[page_id] for page_id in page_ids}
+        exclusions = []
+    markdown_by_page = _compiled_markdown(vault, expected)
     evaluator = _evaluator(payload.get("evaluator"))
     standard = _standard(payload.get("standard"))
     actual_standard_sha256 = _file_sha256(standard_path, "content quality standard")
@@ -90,7 +107,7 @@ def evaluate_content_quality(
             errors.append(f"quality review references unknown page: {page_id}")
             continue
         if page_id not in expected:
-            errors.append(f"quality review references excluded page: {page_id}")
+            errors.append(f"quality review references excluded or out-of-scope page: {page_id}")
             continue
         output_sha256 = _digest(raw_review.get("output_sha256"), "quality review output_sha256")
         if output_sha256 != expected[page_id]:
@@ -121,6 +138,10 @@ def evaluate_content_quality(
     return {
         "version": 1,
         "passed": not errors,
+        "scope": {
+            "mode": "selected-pages" if page_ids else "all-pages",
+            "page_ids": list(page_ids),
+        },
         "evaluator": evaluator,
         "standard": standard,
         "prompt": {"sha256": actual_prompt_sha256},

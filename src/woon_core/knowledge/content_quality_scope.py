@@ -12,9 +12,24 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 
+from woon_core.errors import WoonError
+
 PRIVATE_NOVEL_REASON = "private-novel-hosted-review-prohibited"
 BOOK_READER_REASON = "book-reader-contract"
 SOURCE_INDEX_REASON = "source-index-contract"
+
+
+def quality_review_page_ids(value: object) -> tuple[str, ...]:
+    """Validate exact, unique page IDs; an omitted/empty selection means all pages."""
+
+    if not isinstance(value, (list, tuple)) or any(
+        not isinstance(page_id, str) or not page_id or page_id != page_id.strip()
+        for page_id in value
+    ):
+        raise WoonError("quality review page_ids must contain nonblank exact page IDs")
+    if len(set(value)) != len(value):
+        raise WoonError("quality review page_ids must not contain duplicate pages")
+    return tuple(sorted(value))
 
 
 def book_reader_roots(pages: Iterable[Mapping[str, object]]) -> set[str]:

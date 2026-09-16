@@ -73,6 +73,15 @@ woon career analyze --id company-role-2026 --vault /path/to/woon-knowledge
 woon career context --id company-role-2026 --vault /path/to/woon-knowledge
 ```
 
+품질 검토의 기본 범위는 전체 corpus다. 변경 문서만 검토할 때는
+`quality-review-plan`과 `evaluate-quality` 양쪽에 같은 `--page-id <id>`를 반복해서 지정한다.
+plan은 선택한 본문만 담고, assembly와 rebase는 그 범위를 보존한다. 평가 결과의
+`scope.mode: selected-pages`는 지정 문서만 통과했다는 뜻이며 전체 품질 승인을 대신하지 않는다.
+평가 시 범위가 다르거나 검토가 누락되거나 현재 본문·receipt·표준·prompt hash가 바뀌면 거절한다.
+private Novel·책 독자 문서·원자료 색인은 기존 전용 계약으로 검증하며 명시 선택으로 우회할 수 없다.
+이 검사는 문장 품질 검토의 유효성을 확인한다. source·claim·page spec 의존성의 최신성과
+출처는 기존 `compile-audit`에서 별도로 확인하고, 영향받은 문서의 page ID는 담당자가 명시한다.
+
 검토한 private PDF·HTML의 파일명과 활성 연결을 함께 바꿀 때는
 `KnowledgeService.apply_wiki_restructure_transaction`의 선택 인자
 `resource_renames`와 `resource_reference_writes`를 사용한다.

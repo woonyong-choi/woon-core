@@ -29,6 +29,7 @@ from woon_core.knowledge.content_quality_scope import (
     SOURCE_INDEX_REASON,
     book_reader_roots,
     content_quality_exclusion_reason,
+    quality_review_page_ids,
 )
 
 PLAN_VERSION = 1
@@ -50,8 +51,9 @@ def create_content_quality_review_plan(
     output_dir: Path,
     batch_size: int,
     max_batch_chars: int = DEFAULT_MAX_BATCH_CHARS,
+    page_ids: tuple[str, ...] = (),
 ) -> dict[str, object]:
-    """Write immutable review inputs for every externally reviewable compiled page.
+    """Write immutable inputs for selected pages, or all reviewable pages by default.
 
     A plan directory is deliberately write-once.  Reusing an old plan after a
     compiler or writing-standard change would otherwise make stale reviews look
@@ -64,7 +66,8 @@ def create_content_quality_review_plan(
     _validate_max_batch_chars(max_batch_chars)
     standard = _reference(standard_path, standard_uri, "writing standard")
     prompt = _reference(prompt_path, prompt_uri, "quality review prompt")
-    targets, exclusions = _current_review_scope(vault)
+    page_ids = quality_review_page_ids(page_ids)
+    targets, exclusions = _current_review_scope(vault, page_ids)
     destination = output_dir.expanduser().resolve()
     if destination.exists():
         raise WoonError(f"quality review plan output already exists: {destination}")
@@ -136,6 +139,8 @@ def create_content_quality_review_plan(
         "exclusions": exclusions,
         "batches": manifest_batches,
     }
+    if page_ids:
+        manifest["page_ids"] = list(page_ids)
     destination.mkdir(mode=_RUNTIME_DIRECTORY_MODE, parents=True)
     try:
         for path, payload in rendered_batches:
@@ -160,6 +165,7 @@ def create_content_quality_review_plan(
         "excluded_pages": len(exclusions),
         "batches": len(batches),
         "targets_sha256": manifest["targets_sha256"],
+        "page_ids": list(page_ids),
     }
 
 
@@ -201,6 +207,7 @@ def rebase_content_quality_review_plan(
         destination,
         batch_size,
         max_batch_chars,
+        page_ids=quality_review_page_ids(prior.get("page_ids", ())),
     )
     current = _load_object(destination / "manifest.json", "rebased quality review plan")
     _validate_plan(current)
@@ -296,7 +303,8 @@ def assemble_content_quality_reviews(
 
     plan = _load_object(plan_path, "quality review plan")
     _validate_plan(plan)
-    current_targets, current_exclusions = _current_review_scope(vault)
+    page_ids = quality_review_page_ids(plan.get("page_ids", ()))
+    current_targets, current_exclusions = _current_review_scope(vault, page_ids)
     if plan["targets_sha256"] != _targets_digest(current_targets):
         raise WoonError("quality review plan is stale for the current compiled pages")
     _validate_current_exclusions(plan, current_exclusions)
@@ -360,6 +368,8 @@ def assemble_content_quality_reviews(
             "exclusions": current_exclusions,
         },
     }
+    if page_ids:
+        payload["page_ids"] = list(page_ids)
     atomic_write(destination, encode_json(payload), mode=_RUNTIME_FILE_MODE)
     return {
         "version": PLAN_VERSION,
@@ -368,6 +378,7 @@ def assemble_content_quality_reviews(
         "excluded_pages": len(current_exclusions),
         "reviews": len(reviews),
         "targets_sha256": plan["targets_sha256"],
+        "page_ids": list(page_ids),
     }
 
 
@@ -378,7 +389,9 @@ def _current_targets(vault: Path) -> list[dict[str, str]]:
     return targets
 
 
-def _current_review_scope(vault: Path) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+def _current_review_scope(
+    vault: Path, page_ids: tuple[str, ...] = ()
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     root = vault.expanduser().resolve()
     pages = _load_yaml_list(root / "catalog/llm-wiki/pages.yaml", "pages")
     receipts = _load_yaml_list(root / "catalog/llm-wiki/receipts.yaml", "receipts")
@@ -409,10 +422,14 @@ def _current_review_scope(vault: Path) -> tuple[list[dict[str, str]], list[dict[
         frontmatter = page.get("frontmatter")
         if frontmatter is not None and not isinstance(frontmatter, dict):
             raise WoonError("quality review page frontmatter must be a mapping")
+        if page_ids and page_id not in page_ids:
+            continue
         exclusion_reason = content_quality_exclusion_reason(
             page_id, output_path, book_roots, frontmatter
         )
         if exclusion_reason is not None:
+            if page_ids:
+                raise WoonError(f"quality review selected page is excluded: {page_id}")
             # This manifest records the exact current bytes but never copies
             # excluded Markdown into the hosted-review input.
             exclusions.append(
@@ -444,6 +461,9 @@ def _current_review_scope(vault: Path) -> tuple[list[dict[str, str]], list[dict[
     extra = sorted(set(receipt_hashes).difference(seen))
     if extra:
         raise WoonError("quality review receipts have no page spec: " + ",".join(extra))
+    missing = sorted(set(page_ids).difference(seen))
+    if missing:
+        raise WoonError("quality review selected pages are unknown: " + ",".join(missing))
     return (
         sorted(targets, key=lambda target: target["page_id"]),
         sorted(exclusions, key=lambda exclusion: exclusion["page_id"]),
@@ -606,6 +626,8 @@ def _reviews_for_batch(
         page_id = _text(review.get("page_id"), f"quality review result {batch_id} page_id")
         if page_id in received:
             raise WoonError(f"duplicate quality review in batch {batch_id}: {page_id}")
+        if page_id not in expected:
+            raise WoonError(f"quality review result {batch_id} has unexpected page: {page_id}")
         output_sha256 = _digest(
             review.get("output_sha256"), f"quality review result {batch_id} output_sha256"
         )
@@ -657,6 +679,7 @@ def _reviews_for_batch(
 def _validate_plan(plan: dict[str, object]) -> None:
     if plan.get("version") != PLAN_VERSION:
         raise WoonError("quality review plan has unsupported version")
+    quality_review_page_ids(plan.get("page_ids", ()))
     _mapping(plan.get("standard"), "quality review plan standard")
     _mapping(plan.get("prompt"), "quality review plan prompt")
     _digest(plan.get("targets_sha256"), "quality review plan targets_sha256")

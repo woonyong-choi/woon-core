@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from io import StringIO
 from pathlib import Path
 
 import pytest
 import yaml
 
+from woon_core.cli import run
 from woon_core.errors import WoonError
+from woon_core.knowledge.codex_quality_review import run_codex_quality_reviews
 from woon_core.knowledge.content_quality_evaluation import evaluate_content_quality
 from woon_core.knowledge.content_quality_review_plan import (
     _batch_targets,
@@ -230,6 +233,18 @@ def test_plan_excludes_private_novel_bytes_before_any_review_runner(tmp_path: Pa
         for batch in manifest["batches"]
         for target in batch["targets"]
     )
+    with pytest.raises(WoonError, match="selected page is excluded"):
+        create_content_quality_review_plan(
+            vault,
+            standard,
+            "repo://skills/standards/learning-writing-harness.md",
+            prompt,
+            "repo://skills/standards/learning-quality-review-prompt.md",
+            tmp_path / "private-plan",
+            1,
+            page_ids=("private/novel/scene",),
+        )
+    assert not (tmp_path / "private-plan").exists()
 
 
 def test_plan_excludes_entire_explicit_book_reader_lineage(tmp_path: Path) -> None:
@@ -410,7 +425,131 @@ def test_creates_resumable_review_batches_and_assembles_current_payload(tmp_path
     assert evaluate_content_quality(vault, assembled, standard, prompt)["passed"] is True
 
 
-def test_refuses_to_assemble_a_plan_after_a_compiled_receipt_changes(tmp_path: Path) -> None:
+def test_explicit_scope_survives_cli_assembly_evaluation_and_rebase(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _write_vault(vault)
+    standard, prompt = _write_standards(tmp_path)
+    plan_dir = tmp_path / "plan"
+    # An unrelated page need not be loaded or sent to the reviewer.
+    (vault / "wiki/os/second.md").unlink()
+    common = ["--vault", str(vault), "--standard", str(standard), "--prompt", str(prompt)]
+    run(
+        [
+            "knowledge",
+            "quality-review-plan",
+            *common,
+            "--output",
+            str(plan_dir),
+            "--page-id",
+            "os/first",
+        ],
+        StringIO(),
+    )
+    manifest = json.loads((plan_dir / "manifest.json").read_text())
+    assert manifest["page_ids"] == ["os/first"]
+    assert [target["page_id"] for batch in manifest["batches"] for target in batch["targets"]] == [
+        "os/first"
+    ]
+    results = tmp_path / "results"
+    _write_results(plan_dir, results)
+    assembled = tmp_path / "assembled.json"
+    assemble_content_quality_reviews(
+        vault, plan_dir / "manifest.json", results, standard, "test-judge", "1", assembled
+    )
+    output = StringIO()
+    run(
+        [
+            "knowledge",
+            "evaluate-quality",
+            *common,
+            "--reviews",
+            str(assembled),
+            "--page-id",
+            "os/first",
+        ],
+        output,
+    )
+    report = json.loads(output.getvalue())
+    assert report["passed"] is True
+    assert report["scope"] == {"mode": "selected-pages", "page_ids": ["os/first"]}
+    assert report["coverage"]["compiled_pages"] == 2
+    assert report["coverage"]["reviewed_pages"] == 1
+    with pytest.raises(WoonError, match="scope"):
+        evaluate_content_quality(vault, assembled, standard, prompt)
+    with pytest.raises(WoonError, match="scope"):
+        evaluate_content_quality(vault, assembled, standard, prompt, page_ids=("os/second",))
+
+    rebased = rebase_content_quality_review_plan(
+        vault,
+        plan_dir / "manifest.json",
+        results,
+        standard,
+        "repo://skills/standards/learning-writing-harness.md",
+        prompt,
+        "repo://skills/standards/learning-quality-review-prompt.md",
+        tmp_path / "rebased",
+        tmp_path / "rebased-results",
+        1,
+    )
+    assert rebased["reused_pages"] == 1
+    assert json.loads((tmp_path / "rebased/manifest.json").read_text())["page_ids"] == ["os/first"]
+
+
+@pytest.mark.parametrize("page_ids", [("missing",), ("os/first", "os/first"), ("",)])
+def test_invalid_explicit_scope_creates_no_review_inputs(
+    tmp_path: Path, page_ids: tuple[str, ...]
+) -> None:
+    vault = tmp_path / "vault"
+    _write_vault(vault)
+    standard, prompt = _write_standards(tmp_path)
+    destination = tmp_path / "plan"
+    with pytest.raises(WoonError, match="page"):
+        create_content_quality_review_plan(
+            vault,
+            standard,
+            "repo://skills/standards/learning-writing-harness.md",
+            prompt,
+            "repo://skills/standards/learning-quality-review-prompt.md",
+            destination,
+            1,
+            page_ids=page_ids,
+        )
+    assert not destination.exists()
+
+
+def test_runner_rejects_scoped_manifest_with_an_unselected_batch_before_authentication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _write_vault(vault)
+    standard, prompt = _write_standards(tmp_path)
+    plan_dir = tmp_path / "plan"
+    create_content_quality_review_plan(
+        vault,
+        standard,
+        "repo://skills/standards/learning-writing-harness.md",
+        prompt,
+        "repo://skills/standards/learning-quality-review-prompt.md",
+        plan_dir,
+        1,
+    )
+    manifest_path = plan_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["page_ids"] = ["os/first"]
+    manifest_path.write_text(json.dumps(manifest))
+    monkeypatch.setattr(
+        "woon_core.knowledge.codex_quality_review._codex_binary",
+        lambda _: pytest.fail("scope must be checked before accessing the provider"),
+    )
+    with pytest.raises(WoonError, match="selected page scope"):
+        run_codex_quality_reviews(manifest_path, tmp_path / "results")
+    assert not (tmp_path / "results").exists()
+
+
+@pytest.mark.parametrize("page_ids", [(), ("os/first",)])
+def test_refuses_to_assemble_a_plan_after_a_compiled_receipt_changes(
+    tmp_path: Path, page_ids: tuple[str, ...]
+) -> None:
     vault = tmp_path / "vault"
     _write_vault(vault)
     standard, prompt = _write_standards(tmp_path)
@@ -423,6 +562,7 @@ def test_refuses_to_assemble_a_plan_after_a_compiled_receipt_changes(tmp_path: P
         "repo://skills/standards/learning-quality-review-prompt.md",
         plan_dir,
         2,
+        page_ids=page_ids,
     )
     results = tmp_path / "results"
     _write_results(plan_dir, results)
