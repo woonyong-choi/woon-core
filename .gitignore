@@ -9,3 +9,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .coverage
+
+# Local-only scratch, AI work products and one-shot staging helpers.
+.local/
+*.bak
