@@ -116,13 +116,17 @@ class _SourceNodes(HTMLParser):
         return self.nodes[chosen], chosen
 
 
+# U+27A5, the publisher's explicit line-continuation arrow inside printed code.
+_CONTINUATION_ARROW = "\u27a5"
+
+
 def _code_lines(text: str) -> str:
     return "\n".join(line.rstrip() for line in text.splitlines()).strip()
 
 
 def _prose(text: str) -> str:
     text = re.sub(r"^[#*\s]+", "", text)
-    text = re.sub(r"[❶-❿①-⑳]", "", text)
+    text = re.sub(r"[\u2776-\u277f\u2460-\u2473]", "", text)
     return "".join(text.replace("`", "").replace("*", "").split())
 
 
@@ -204,8 +208,10 @@ def source_mapping(
             raise WoonError("source code mapping must select a pre node")
         text = node["text"].replace("\r\n", "\n")
         legacy_clean = re.sub(r"[ \t]*//[ \t]*[①-⑳][ \t]*(?=\n|$)", "", legacy)
-        clean = re.sub(r"[❶-❿①-⑳]", "", text)
-        if _code_lines(legacy_clean.replace("➥", "")) != _code_lines(clean.replace("➥", "")):
+        clean = re.sub(r"[\u2776-\u277f\u2460-\u2473]", "", text)
+        legacy_joined = legacy_clean.replace(_CONTINUATION_ARROW, "")
+        joined = clean.replace(_CONTINUATION_ARROW, "")
+        if _code_lines(legacy_joined) != _code_lines(joined):
             raise WoonError("source mapping legacy code differs from the original pre payload")
     elif _prose(legacy) != _prose(node["text"]):
         raise WoonError("source mapping legacy prose differs from original HTML text")

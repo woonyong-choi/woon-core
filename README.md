@@ -478,7 +478,7 @@ symlink·원격 실행·외부 전송 기록은 거부한다. 이 검사는 코�
 다른 scope의 기존 오류를 새 scope의 성공으로 간주하거나 이 경로로 전체 phase를 올리지 않는다.
 
 Markdown 본문의 설명 표식은 밝은 원형 숫자 `①`부터 `⑩`까지 사용하며, 낮은 대비의
-검은 원형 숫자 `❶`부터 `❿`까지가 남은 payload는 승격 전에 거부한다. 원본 figure asset은
+검은 원형 숫자(U+2776~U+277F)가 남은 payload는 승격 전에 거부한다. 원본 figure asset은
 변형하지 않는다.
 번호 section은 descendant wrapper가 아니라 Map H2 group이고, 퇴역 wrapper prose는 첫 terminal
 leaf의 exact relocated span evidence로 보존한다.

@@ -8404,7 +8404,7 @@ def _curated_body(value: str, *, allow_empty: bool = False) -> str:
         raise WoonError("curated revision body must not include frontmatter")
     if re.match(r"\s*#\s+", body):
         raise WoonError("curated revision body must not include an H1")
-    if re.search(r"[❶❷❸❹❺❻❼❽❾❿]", body):
+    if re.search(r"[\u2776-\u277f]", body):
         raise WoonError(
             "verified book textual callouts must use ① through ⑩; "
             "negative dingbat callouts are too low-contrast"

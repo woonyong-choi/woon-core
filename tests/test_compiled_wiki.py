@@ -2365,7 +2365,7 @@ def test_verified_book_promotion_creates_child_and_archives_prior_revision(
             (
                 replace(
                     first,
-                    body="## 문제 장면\n\n```kotlin\nval answer = 42 // ❶\n```\n",
+                    body="## 문제 장면\n\n```kotlin\nval answer = 42 // \u2776\n```\n",
                 ),
             )
         )
