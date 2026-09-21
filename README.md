@@ -81,6 +81,8 @@ plan은 선택한 본문만 담고, assembly와 rebase는 그 범위를 보존�
 private Novel·책 독자 문서·원자료 색인은 기존 전용 계약으로 검증하며 명시 선택으로 우회할 수 없다.
 이 검사는 문장 품질 검토의 유효성을 확인한다. source·claim·page spec 의존성의 최신성과
 출처는 기존 `compile-audit`에서 별도로 확인하고, 영향받은 문서의 page ID는 담당자가 명시한다.
+Wiki 밖의 번역·기술 학습·조사 보고·일반 안내·개인 기록·창작은
+[evidence-bound writing quality](docs/writing-quality.md)의 version 2 수동 검토 계약을 사용한다.
 
 검토한 private PDF·HTML의 파일명과 활성 연결을 함께 바꿀 때는
 `KnowledgeService.apply_wiki_restructure_transaction`의 선택 인자

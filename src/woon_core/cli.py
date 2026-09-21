@@ -148,6 +148,13 @@ from woon_core.skills import plan as plan_skills
 from woon_core.skills import validate as validate_skills
 from woon_core.tasks.cli import run_tasks
 from woon_core.workspace import Workspace, discover, initialize
+from woon_core.writing_quality import (
+    adopt_writing_rule,
+    evaluate_writing_review,
+    evaluate_writing_rule_candidate,
+    register_writing_rule_application,
+    rollback_writing_rule,
+)
 
 USAGE = """woon - deterministic control plane for the Woon development system
 
@@ -261,6 +268,14 @@ Usage:
     [--output <path>] [--vault <path>]
   woon knowledge evaluate-quality --reviews <path> --standard <path> --prompt <path>
     [--page-id <id>...] [--output <path>] [--vault <path>]
+  woon knowledge evaluate-writing-review --request <path> --review <path>
+  woon knowledge evaluate-writing-rule --candidate <path>
+  woon knowledge adopt-writing-rule --policy <path> --candidate <path>
+    --expected-policy-sha256 <sha256>
+  woon knowledge register-writing-rule-application --policy <path> --request <path>
+    --expected-policy-sha256 <sha256>
+  woon knowledge rollback-writing-rule --policy <path> --rule-id <id>
+    --expected-policy-sha256 <sha256>
   woon knowledge quality-review-plan --standard <path> --prompt <path> --output <directory>
     [--batch-size <1..64>] [--max-batch-chars <4000..200000>]
     [--standard-uri <repo-uri>] [--prompt-uri <repo-uri>]
@@ -771,6 +786,21 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         return
     if command == "evaluate-quality":
         _run_content_quality_evaluation(raw_options, output)
+        return
+    if command == "evaluate-writing-review":
+        _run_writing_review_evaluation(raw_options, output)
+        return
+    if command == "evaluate-writing-rule":
+        _run_writing_rule_evaluation(raw_options, output)
+        return
+    if command == "adopt-writing-rule":
+        _run_writing_rule_adoption(raw_options, output)
+        return
+    if command == "register-writing-rule-application":
+        _run_writing_rule_application_registration(raw_options, output)
+        return
+    if command == "rollback-writing-rule":
+        _run_writing_rule_rollback(raw_options, output)
         return
     if command == "quality-review-plan":
         _run_content_quality_review_plan(raw_options, output)
@@ -3402,6 +3432,84 @@ def _run_content_quality_review_plan(arguments: list[str], output: TextIO) -> No
         tuple(page_ids),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_writing_review_evaluation(arguments: list[str], output: TextIO) -> None:
+    values = _required_path_arguments(
+        arguments, "evaluate-writing-review", {"--request", "--review"}
+    )
+    result = evaluate_writing_review(
+        Path(values["--request"]).expanduser().resolve(),
+        Path(values["--review"]).expanduser().resolve(),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_writing_rule_evaluation(arguments: list[str], output: TextIO) -> None:
+    values = _required_path_arguments(arguments, "evaluate-writing-rule", {"--candidate"})
+    result = evaluate_writing_rule_candidate(Path(values["--candidate"]).expanduser().resolve())
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_writing_rule_adoption(arguments: list[str], output: TextIO) -> None:
+    values = _required_path_arguments(
+        arguments,
+        "adopt-writing-rule",
+        {"--policy", "--candidate", "--expected-policy-sha256"},
+    )
+    result = adopt_writing_rule(
+        Path(values["--policy"]).expanduser().resolve(),
+        Path(values["--candidate"]).expanduser().resolve(),
+        values["--expected-policy-sha256"],
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_writing_rule_rollback(arguments: list[str], output: TextIO) -> None:
+    values = _required_path_arguments(
+        arguments,
+        "rollback-writing-rule",
+        {"--policy", "--rule-id", "--expected-policy-sha256"},
+    )
+    result = rollback_writing_rule(
+        Path(values["--policy"]).expanduser().resolve(),
+        values["--rule-id"],
+        values["--expected-policy-sha256"],
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_writing_rule_application_registration(arguments: list[str], output: TextIO) -> None:
+    values = _required_path_arguments(
+        arguments,
+        "register-writing-rule-application",
+        {"--policy", "--request", "--expected-policy-sha256"},
+    )
+    result = register_writing_rule_application(
+        Path(values["--policy"]).expanduser().resolve(),
+        Path(values["--request"]).expanduser().resolve(),
+        values["--expected-policy-sha256"],
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _required_path_arguments(
+    arguments: list[str], command: str, required: set[str]
+) -> dict[str, str]:
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in required:
+            raise WoonError(f"unexpected knowledge {command} argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    missing = sorted(required.difference(values))
+    if missing:
+        raise WoonError(f"knowledge {command} requires " + ", ".join(missing))
+    return values
 
 
 def _run_content_quality_review_rebase(arguments: list[str], output: TextIO) -> None:
