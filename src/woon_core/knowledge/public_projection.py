@@ -93,6 +93,7 @@ class PublicProjectionReport:
     content_root: Path
     documents: tuple[PublicProjectionDocument, ...]
     excluded_private_targets: tuple[str, ...]
+    excluded_planned_targets: tuple[str, ...]
     link_checks: tuple[str, ...]
     build_id: str
     input_sha256: str
@@ -141,8 +142,10 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
     selected: list[dict[str, Any]] = []
     excluded: list[str] = []
     all_targets: dict[str, dict[str, Any]] = {}
+    all_targets_by_id: dict[str, dict[str, Any]] = {}
     for page in pages:
         page_id = _required_string(page, "page_id", "page spec")
+        all_targets_by_id[page_id] = page
         for alias in _page_aliases(root, page):
             existing = all_targets.get(alias)
             if existing is not None and existing is not page:
@@ -154,6 +157,13 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
             selected.append(page)
         else:
             excluded.append(page_id)
+
+    selected, dropped_planned = _retain_navigable_pages(selected, all_targets)
+    planned_targets: dict[str, dict[str, Any]] = {}
+    for page_id in dropped_planned:
+        page = all_targets_by_id[page_id]
+        for alias in _page_aliases(root, page):
+            planned_targets[alias] = page
 
     candidates: dict[str, dict[str, Any]] = {}
     for page in selected:
@@ -199,6 +209,7 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
             frontmatter,
             candidates,
             all_targets,
+            planned_targets,
             projection_targets,
             link_checks,
         )
@@ -207,6 +218,7 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
             body,
             candidates,
             all_targets,
+            planned_targets,
             projection_targets,
             link_checks,
         )
@@ -253,6 +265,7 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
             for item in documents
         ],
         "excluded_private_targets": sorted(excluded),
+        "excluded_planned_targets": list(dropped_planned),
         "link_checks": sorted(set(link_checks)),
     }
     if redirects:
@@ -281,6 +294,7 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
         "output_sha256": output_sha256,
         "documents": document_hashes,
         "excluded_private_targets": sorted(excluded),
+        "excluded_planned_targets": list(dropped_planned),
         "link_checks": sorted(set(link_checks)),
     }
     if redirect_hashes:
@@ -292,6 +306,7 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
         content_root=content_root,
         documents=tuple(documents),
         excluded_private_targets=tuple(sorted(excluded)),
+        excluded_planned_targets=tuple(dropped_planned),
         link_checks=tuple(sorted(set(link_checks))),
         build_id=build_id,
         input_sha256=input_sha256,
@@ -299,6 +314,49 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
         receipt=receipt_bytes,
         redirects=tuple(redirects),
     )
+
+
+def _retain_navigable_pages(
+    selected: list[dict[str, Any]], all_targets: dict[str, dict[str, Any]]
+) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+    """Drop ``planned`` stubs, keeping those a retained page navigates through.
+
+    A ``planned`` page is a registered keyword with no reader body yet, so
+    publishing one only adds an empty file to the public site input. The site
+    already removes them at build time and keeps the ancestors its retained
+    pages need for navigation, so the projection applies the same rule at the
+    source and never writes the rest. The retained set therefore matches what
+    the site renders, and no surviving page can link to a file that is absent.
+    """
+
+    by_id = {_required_string(page, "page_id", "page spec"): page for page in selected}
+    planned = {
+        page_id
+        for page_id, page in by_id.items()
+        if _mapping(page.get("frontmatter"), f"page {page_id} frontmatter").get("content_status")
+        == "planned"
+    }
+    retained = set(by_id) - planned
+    frontier = retained
+    while frontier:
+        ancestors: set[str] = set()
+        for page_id in frontier:
+            frontmatter = _mapping(by_id[page_id].get("frontmatter"), f"page {page_id} frontmatter")
+            parent = frontmatter.get("parent")
+            if parent is None:
+                continue
+            target = _relation_target(parent, f"{page_id}.parent")
+            parent_page = all_targets.get(target)
+            if parent_page is None:
+                continue
+            parent_id = _required_string(parent_page, "page_id", "page spec")
+            if parent_id in retained or parent_id not in by_id:
+                continue
+            ancestors.add(parent_id)
+        retained |= ancestors
+        frontier = ancestors
+    kept = [page for page in selected if _required_string(page, "page_id", "page spec") in retained]
+    return kept, tuple(sorted(planned - retained))
 
 
 def _prepare_redirects(
@@ -622,6 +680,7 @@ def _validate_frontmatter_relations(
     frontmatter: dict[str, Any],
     candidates: dict[str, dict[str, Any]],
     all_targets: dict[str, dict[str, Any]],
+    planned_targets: dict[str, dict[str, Any]],
     projection_targets: dict[str, str],
     link_checks: list[str],
 ) -> tuple[str, ...]:
@@ -630,7 +689,13 @@ def _validate_frontmatter_relations(
     if parent is not None:
         target = _relation_target(parent, f"{page_id}.parent")
         parent_page = _require_public_relation(
-            page_id, target, candidates, all_targets, projection_targets, link_checks
+            page_id,
+            target,
+            candidates,
+            all_targets,
+            planned_targets,
+            projection_targets,
+            link_checks,
         )
     public_parent_id = frontmatter.get("public_parent_id")
     if public_parent_id is not None and (
@@ -647,7 +712,13 @@ def _validate_frontmatter_relations(
         for item in value:
             target = _relation_target(item, f"{page_id}.{field}")
             _require_public_relation(
-                page_id, target, candidates, all_targets, projection_targets, link_checks
+                page_id,
+                target,
+                candidates,
+                all_targets,
+                planned_targets,
+                projection_targets,
+                link_checks,
             )
     navigation = frontmatter.get("navigation_groups")
     if navigation is not None:
@@ -661,7 +732,13 @@ def _validate_frontmatter_relations(
             for child in children:
                 target = _relation_target(child, f"{page_id}.navigation_groups.children")
                 _require_public_relation(
-                    page_id, target, candidates, all_targets, projection_targets, link_checks
+                    page_id,
+                    target,
+                    candidates,
+                    all_targets,
+                    planned_targets,
+                    projection_targets,
+                    link_checks,
                 )
     if public_nav_root or parent_page is None:
         return ()
@@ -670,6 +747,7 @@ def _validate_frontmatter_relations(
         parent_page,
         candidates,
         all_targets,
+        planned_targets,
         projection_targets,
         link_checks,
     )
@@ -687,6 +765,7 @@ def _navigation_ancestry(
     parent_page: dict[str, Any],
     candidates: dict[str, dict[str, Any]],
     all_targets: dict[str, dict[str, Any]],
+    planned_targets: dict[str, dict[str, Any]],
     projection_targets: dict[str, str],
     link_checks: list[str],
 ) -> tuple[str, ...]:
@@ -713,6 +792,7 @@ def _navigation_ancestry(
             target,
             candidates,
             all_targets,
+            planned_targets,
             projection_targets,
             link_checks,
         )
@@ -739,6 +819,7 @@ def _require_public_relation(
     target: str,
     candidates: dict[str, dict[str, Any]],
     all_targets: dict[str, dict[str, Any]],
+    planned_targets: dict[str, dict[str, Any]],
     projection_targets: dict[str, str],
     link_checks: list[str],
 ) -> dict[str, Any] | None:
@@ -751,6 +832,12 @@ def _require_public_relation(
             f"{page_id}:public:{_required_string(candidate, 'page_id', 'public relation')}"
         )
         return candidate
+    planned = planned_targets.get(target)
+    if planned is not None:
+        link_checks.append(
+            f"{page_id}:planned:{_required_string(planned, 'page_id', 'planned relation')}"
+        )
+        return None
     if _is_hidden_wiki_hub(target, all_targets):
         link_checks.append(f"{page_id}:hidden-hub:{target}")
         return None
@@ -775,6 +862,7 @@ def _project_body(
     body: str,
     candidates: dict[str, dict[str, Any]],
     all_targets: dict[str, dict[str, Any]],
+    planned_targets: dict[str, dict[str, Any]],
     projection_targets: dict[str, str],
     link_checks: list[str],
 ) -> str:
@@ -785,13 +873,28 @@ def _project_body(
 
     def replace(match: re.Match[str]) -> str:
         target = match.group("target").strip()
+        label = (match.group("label") or target).strip()
+        if target in planned_targets:
+            # The page exists as a keyword but has no reader body, so it is not
+            # projected. Keep the sentence readable instead of linking to a file
+            # the site does not publish.
+            link_checks.append(
+                f"{page_id}:planned:"
+                f"{_required_string(planned_targets[target], 'page_id', 'planned relation')}"
+            )
+            return label
         resolved = _require_public_relation(
-            page_id, target, candidates, all_targets, projection_targets, link_checks
+            page_id,
+            target,
+            candidates,
+            all_targets,
+            planned_targets,
+            projection_targets,
+            link_checks,
         )
         if resolved is None:
             raise WoonError(f"public projection body links a hidden hub: {page_id} -> {target}")
         target_page_id = _required_string(resolved, "page_id", "public relation")
-        label = (match.group("label") or target).strip()
         anchor = match.group("anchor") or ""
         url = f"/wiki/{projection_targets[target_page_id]}/{_jekyll_heading_fragment(anchor)}"
         return f"[{label}]({url})"

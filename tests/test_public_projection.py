@@ -45,9 +45,22 @@ def test_keyword_preview_preserves_planned_state_and_child_navigation(tmp_path: 
         body="<!-- planned -->",
     )
     page["frontmatter"]["content_status"] = "planned"
-    vault, site = _write_fixture(tmp_path, [page])
+    child = _page(
+        page_id="Wiki/kotlin/coroutines",
+        title="코루틴",
+        publication_state="publish",
+        access="public",
+        slug="coroutines",
+        parent="[[Wiki/kotlin|Kotlin]]",
+    )
+    child["frontmatter"]["content_status"] = "ready"
+    vault, site = _write_fixture(tmp_path, [page, child])
     report = prepare_public_projection(vault, site)
-    rendered = report.documents[0].content.decode()
+    rendered = next(
+        document.content.decode()
+        for document in report.documents
+        if document.page_id == "Wiki/kotlin"
+    )
     assert "content_status: planned" in rendered
     assert "has_toc: true" in rendered
     assert "작성 예정" in rendered
@@ -64,7 +77,16 @@ def test_keyword_preview_does_not_override_private_provenance(tmp_path: Path) ->
         source_ids=["source://private/book"],
     )
     page["frontmatter"]["content_status"] = "planned"
-    vault, site = _write_fixture(tmp_path, [page], source_privacy="local-only")
+    child = _page(
+        page_id="Wiki/kotlin/coroutines",
+        title="코루틴",
+        publication_state="publish",
+        access="public",
+        slug="coroutines",
+        parent="[[Wiki/kotlin|Kotlin]]",
+        source_ids=["source://private/book"],
+    )
+    vault, site = _write_fixture(tmp_path, [page, child], source_privacy="local-only")
     with pytest.raises(WoonError, match="non-public provenance"):
         prepare_public_projection(vault, site)
 
@@ -172,7 +194,7 @@ def test_redirects_are_separate_deterministic_artifacts_and_replay_safely(tmp_pa
         access="public",
         slug="observability",
     )
-    page["frontmatter"].update(content_status="planned", public_redirect_from=["old-observability"])
+    page["frontmatter"].update(content_status="ready", public_redirect_from=["old-observability"])
     vault, site = _write_fixture(tmp_path, [page])
     report = prepare_public_projection(vault, site)
     assert len(report.documents) == 1
@@ -987,16 +1009,123 @@ def test_local_planned_parent_link_does_not_duplicate_public_navigation(
         child["test_body"] = child["test_body"].replace("<!-- woon-wiki-local-parent:end -->\n", "")
         child["test_body"] = "<!-- woon-wiki-local-parent:end -->\n" + child["test_body"]
     child["frontmatter"].update(content_status="planned", reader_navigation="sidebar-only")
-    vault, site = _write_fixture(tmp_path, [parent, child])
+    # The planned keyword is only projected because a written page sits under it.
+    grandchild = _page(
+        page_id="Wiki/array/slicing",
+        title="슬라이싱",
+        publication_state="publish",
+        access="public",
+        slug="slicing",
+        parent="[[Wiki/array|배열]]",
+    )
+    grandchild["frontmatter"]["content_status"] = "ready"
+    vault, site = _write_fixture(tmp_path, [parent, child, grandchild])
     if malformed != "valid":
         with pytest.raises(WoonError, match="malformed managed markers"):
             prepare_public_projection(vault, site)
         return
     report = prepare_public_projection(vault, site)
-    assert len(report.documents) == 2 and not report.redirects
+    assert len(report.documents) == 3 and not report.redirects
     content = next(doc.content.decode() for doc in report.documents if doc.page_id == "Wiki/array")
     metadata = yaml.safe_load(content.split("---", 2)[1])
     assert metadata["parent"] == "자료구조" and metadata["has_toc"] is True
     assert "상위 주제" not in content and "woon-wiki-local-parent" not in content
     assert "[[" not in content and "## 목차" not in content
     assert "작성 예정" in content and "<!-- planned -->" in content
+
+
+def test_planned_keyword_without_a_written_descendant_is_not_projected(tmp_path: Path) -> None:
+    written = _page(
+        page_id="Wiki/kotlin",
+        title="Kotlin",
+        publication_state="publish",
+        access="public",
+        slug="kotlin",
+    )
+    written["frontmatter"]["content_status"] = "ready"
+    stub = _page(
+        page_id="Wiki/keywords/sealed-class",
+        title="sealed class",
+        publication_state="publish",
+        access="public",
+        slug="sealed-class",
+        body="<!-- planned -->",
+    )
+    stub["frontmatter"]["content_status"] = "planned"
+    vault, site = _write_fixture(tmp_path, [written, stub])
+
+    report = prepare_public_projection(vault, site)
+
+    assert [document.page_id for document in report.documents] == ["Wiki/kotlin"]
+    assert report.excluded_planned_targets == ("Wiki/keywords/sealed-class",)
+    assert json.loads(report.receipt)["excluded_planned_targets"] == ["Wiki/keywords/sealed-class"]
+    apply_public_projection(report)
+    assert not (report.content_root / "sealed-class.md").exists()
+
+
+def test_planned_ancestor_is_kept_so_navigation_resolves(tmp_path: Path) -> None:
+    hub = _page(
+        page_id="Wiki/keywords/spring",
+        title="Spring",
+        publication_state="publish",
+        access="public",
+        slug="spring",
+        body="<!-- planned -->",
+    )
+    hub["frontmatter"]["content_status"] = "planned"
+    leaf = _page(
+        page_id="Wiki/spring-boot",
+        title="Spring Boot",
+        publication_state="publish",
+        access="public",
+        slug="spring-boot",
+        parent="[[Wiki/keywords/spring|Spring]]",
+    )
+    leaf["frontmatter"].update(content_status="ready", public_parent_id="Wiki/keywords/spring")
+    vault, site = _write_fixture(tmp_path, [hub, leaf])
+
+    report = prepare_public_projection(vault, site)
+
+    assert {document.page_id for document in report.documents} == {
+        "Wiki/keywords/spring",
+        "Wiki/spring-boot",
+    }
+    assert report.excluded_planned_targets == ()
+    content = next(
+        document.content.decode()
+        for document in report.documents
+        if document.page_id == "Wiki/spring-boot"
+    )
+    metadata = yaml.safe_load(content.split("---", 2)[1])
+    assert metadata["parent"] == "Spring"
+    assert metadata["public_parent_id"] == "Wiki/keywords/spring"
+
+
+def test_links_to_a_dropped_planned_page_keep_their_words_without_a_url(tmp_path: Path) -> None:
+    stub = _page(
+        page_id="Wiki/keywords/quic",
+        title="QUIC",
+        publication_state="publish",
+        access="public",
+        slug="quic",
+        body="<!-- planned -->",
+    )
+    stub["frontmatter"]["content_status"] = "planned"
+    written = _page(
+        page_id="Wiki/http",
+        title="HTTP",
+        publication_state="publish",
+        access="public",
+        slug="http",
+        body="전송 계층은 [[Wiki/keywords/quic|QUIC]]으로 이어진다.",
+    )
+    written["frontmatter"].update(content_status="ready", related_to=["Wiki/keywords/quic"])
+    vault, site = _write_fixture(tmp_path, [stub, written])
+
+    report = prepare_public_projection(vault, site)
+
+    assert [document.page_id for document in report.documents] == ["Wiki/http"]
+    content = report.documents[0].content.decode()
+    assert "전송 계층은 QUIC으로 이어진다." in content
+    assert "/wiki/quic/" not in content and "[[" not in content
+    assert "Wiki/http:planned:Wiki/keywords/quic" in report.link_checks

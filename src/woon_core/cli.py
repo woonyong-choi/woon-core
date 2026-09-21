@@ -1821,6 +1821,7 @@ def _run_public_projection(arguments: list[str], output: TextIO) -> None:
                 "apply": apply,
                 "document_count": len(report.documents),
                 "excluded_private_target_count": len(report.excluded_private_targets),
+                "excluded_planned_target_count": len(report.excluded_planned_targets),
                 "link_check_count": len(report.link_checks),
                 "build_id": report.build_id,
                 "input_sha256": report.input_sha256,
