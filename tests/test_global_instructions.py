@@ -99,6 +99,8 @@ def test_canonical_contract_self_heals_personal_codex_skills() -> None:
     assert "woon skills plan --profile personal --target codex" in source
     assert "woon skills install --profile personal --target codex" in source
     assert "catalog가 가리키는 정본 `SKILL.md`를 직접 읽어 적용한다" in source
+    assert "짧은 작성·번역 교정도 `repo://skills/standards/writing-quality.md`" in source
+    assert "단순 계산·사실 단답" in source
     assert "/Users/" not in source
     for action in ("blocked", "retire", "forget"):
         assert action in source
