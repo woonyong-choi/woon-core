@@ -47,7 +47,7 @@ _RUNTIME_SNAPSHOT = r"""(async () => {
   // need their actual editable-state contract before they can be preserved.
   const passive = new Set(['graph', 'localgraph', 'empty', 'file-explorer', 'search',
     'backlink', 'outgoing-link', 'tag', 'outline', 'bookmarks', 'image', 'pdf',
-    'recent-files', 'all-properties', 'file-properties', 'linked-graph-view']);
+    'recent-files', 'all-properties', 'file-properties', 'linked-graph-view', 'manta-view']);
   const stripColors = value => {
     if (!value || typeof value !== 'object') return;
     delete value.colorGroups;

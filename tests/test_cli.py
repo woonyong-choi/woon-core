@@ -82,6 +82,34 @@ def test_calendar_source_cli_passes_preview_hash_without_exposing_settings(
     ]
 
 
+def test_obsidian_plugin_status_recognises_manta_and_names_the_legacy_plugins(
+    tmp_path: Path,
+) -> None:
+    plugins = tmp_path / ".obsidian/plugins"
+    for plugin_id, version in (("manta", "0.2.0"), ("runnable-code-blocks", "0.2.4")):
+        (plugins / plugin_id).mkdir(parents=True)
+        (plugins / plugin_id / "manifest.json").write_text(
+            json.dumps({"id": plugin_id, "name": plugin_id, "version": version})
+        )
+    (tmp_path / ".obsidian/community-plugins.json").write_text('["manta", "runnable-code-blocks"]')
+    output = StringIO()
+
+    run(["knowledge", "obsidian-plugin", "status", "--vault", str(tmp_path)], output)
+
+    status = json.loads(output.getvalue())
+    assert status["manta"] == {
+        "installed": True,
+        "enabled": True,
+        "version": "0.2.0",
+        "legacy_installed": ["runnable-code-blocks"],
+        "legacy_enabled": ["runnable-code-blocks"],
+    }
+    assert {plugin["id"]: plugin["lifecycle"] for plugin in status["plugins"]} == {
+        "manta": "current",
+        "runnable-code-blocks": "legacy",
+    }
+
+
 def test_governance_skill_inventory_rejects_installed_copy_drift(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     source = workspace / "woon-skills/skills/knowledge/archive/SKILL.md"

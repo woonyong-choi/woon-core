@@ -14,10 +14,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from woon_core.errors import WoonError
 from woon_core.io import exclusive_file_lock
+
+if TYPE_CHECKING:
+    from woon_core.knowledge.runnable_pairing import RunnableTarget
 
 LINK_CALENDAR_ID = "link-calendar"
 LINK_CALENDAR_VERSION = "3.3.0"
@@ -41,31 +44,46 @@ LEGACY_CONTEXT_GRAPH_ID = "context-graph"
 LINKED_GRAPH_VERSION = "1.6.0"
 RUNNABLE_CODE_BLOCKS_ID = "runnable-code-blocks"
 RUNNABLE_CODE_BLOCKS_VERSION = "0.2.4"
+MANTA_ID = "manta"
+MANTA_DIAGRAMS_ID = "manta-diagrams"
+# Standalone plugins that Manta replaces. They stay approved so they can be installed,
+# inspected and retired, and `status` points at them while Manta is also installed.
+LEGACY_PLUGINS = frozenset(
+    {LINK_CALENDAR_ID, LINKED_GRAPH_ID, RUNNABLE_CODE_BLOCKS_ID, MANTA_DIAGRAMS_ID}
+)
+DATA_FILE_NAME = "data.json"
 LOCAL_DEVELOPMENT_PLUGINS = frozenset(
     {
+        MANTA_ID,
         LINK_CALENDAR_ID,
         LINKED_GRAPH_ID,
         RUNNABLE_CODE_BLOCKS_ID,
         "woon-knowledge",
-        "manta-diagrams",
+        MANTA_DIAGRAMS_ID,
     }
 )
 LINK_CALENDAR_SOURCE_REPOSITORY = "https://github.com/woonyong-choi/manta-calendar.git"
 LINKED_GRAPH_SOURCE_REPOSITORY = "https://github.com/woonyong-choi/manta-graph.git"
 RUNNABLE_CODE_BLOCKS_SOURCE_REPOSITORY = "https://github.com/woonyong-choi/manta-code-blocks.git"
+# Manta has no remote yet, so its approved source is a workspace-relative location that
+# the Git root must end with instead of an `origin` URL.
+LOCAL_SOURCE_PREFIX = "local:"
+MANTA_SOURCE_LOCATION = LOCAL_SOURCE_PREFIX + "OSS/obsidian/manta"
 LOCAL_PLUGIN_SOURCE_REPOSITORIES = {
+    MANTA_ID: MANTA_SOURCE_LOCATION,
     LINK_CALENDAR_ID: LINK_CALENDAR_SOURCE_REPOSITORY,
     LINKED_GRAPH_ID: LINKED_GRAPH_SOURCE_REPOSITORY,
     RUNNABLE_CODE_BLOCKS_ID: RUNNABLE_CODE_BLOCKS_SOURCE_REPOSITORY,
     "woon-knowledge": "https://github.com/woonyong-choi/manta.git",
-    "manta-diagrams": "https://github.com/woonyong-choi/manta-diagrams.git",
+    MANTA_DIAGRAMS_ID: "https://github.com/woonyong-choi/manta-diagrams.git",
 }
 
 
 @dataclass(frozen=True)
 class OfficialPlugin:
     plugin_id: str
-    repository: str
+    # None while the plugin has no published GitHub release (local-build only).
+    repository: str | None
 
 
 @dataclass(frozen=True)
@@ -75,6 +93,7 @@ class GitSourceProvenance:
 
 
 OFFICIAL_PLUGINS = {
+    MANTA_ID: OfficialPlugin(plugin_id=MANTA_ID, repository=None),
     LINK_CALENDAR_ID: OfficialPlugin(
         plugin_id=LINK_CALENDAR_ID, repository="woonyong-choi/manta-calendar"
     ),
@@ -108,6 +127,12 @@ RETIRABLE_PLUGINS = {
     LEGACY_CONTEXT_CALENDAR_ID,
     LEGACY_CONTEXT_GRAPH_ID,
 }
+
+
+def _plugin_lifecycle(plugin_id: str) -> str:
+    if plugin_id == MANTA_ID:
+        return "current"
+    return "legacy" if plugin_id in LEGACY_PLUGINS else "other"
 
 
 def _download(url: str) -> bytes:
@@ -213,10 +238,15 @@ def _local_plugin_git_provenance(plugin_id: str, source: Path) -> GitSourceProve
         raise WoonError(f"{plugin_id} build source must be the Git repository root")
     if _git_output(source, plugin_id, "status", "--porcelain", "--untracked-files=all"):
         raise WoonError(f"{plugin_id} build source Git repository must be clean")
+    head_commit = _git_output(source, plugin_id, "rev-parse", "--verify", "HEAD^{commit}")
+    if approved_repository.startswith(LOCAL_SOURCE_PREFIX):
+        location = Path(approved_repository.removeprefix(LOCAL_SOURCE_PREFIX)).parts
+        if repository_root.parts[-len(location) :] != location:
+            raise WoonError(f"{plugin_id} build source location is not approved")
+        return GitSourceProvenance(repository=approved_repository, head_commit=head_commit)
     remote = _git_output(source, plugin_id, "remote", "get-url", "origin")
     if _normalize_github_repository(remote) != _normalize_github_repository(approved_repository):
         raise WoonError(f"{plugin_id} build source origin is not approved")
-    head_commit = _git_output(source, plugin_id, "rev-parse", "--verify", "HEAD^{commit}")
     return GitSourceProvenance(
         repository=_normalize_github_repository(remote) + ".git",
         head_commit=head_commit,
@@ -282,14 +312,25 @@ class ObsidianPluginService:
                     "name": manifest.get("name"),
                     "version": manifest.get("version"),
                     "enabled_in_config": plugin_id in enabled,
+                    "lifecycle": _plugin_lifecycle(plugin_id),
                     "is_mindmap": "mindmap" in plugin_id.casefold()
                     or "mind map" in str(manifest.get("name", "")).casefold(),
                     "settings_files": settings,
                 }
             )
+        installed = {plugin["id"]: plugin for plugin in plugins}
+        manta = installed.get(MANTA_ID)
+        legacy_installed = sorted(LEGACY_PLUGINS.intersection(installed))
         return {
             "vault": str(self._vault),
             "community_enabled_ids": sorted(enabled),
+            "manta": {
+                "installed": manta is not None,
+                "enabled": MANTA_ID in enabled,
+                "version": manta["version"] if manta else None,
+                "legacy_installed": legacy_installed,
+                "legacy_enabled": sorted(LEGACY_PLUGINS.intersection(enabled)),
+            },
             "plugins": plugins,
             "runtime_loaded": "unknown-until-Obsidian-reloads",
         }
@@ -687,7 +728,7 @@ class ObsidianPluginService:
         self, *, apply: bool, expected_settings_sha256: str | None
     ) -> dict[str, Any]:
         self._require_vault()
-        settings_path = self._plugins / LINK_CALENDAR_ID / "data.json"
+        settings_path = self._plugin_data_path(LINK_CALENDAR_ID)
         _require_vault_local_file(self._vault, settings_path, "Manta Calendar settings")
         manifest = self._installed_manifest(LINK_CALENDAR_ID)
         before = settings_path.read_bytes()
@@ -749,7 +790,7 @@ class ObsidianPluginService:
         self, *, apply: bool, expected_settings_sha256: str | None
     ) -> dict[str, Any]:
         self._require_vault()
-        settings_path = self._plugins / LINK_CALENDAR_ID / "data.json"
+        settings_path = self._plugin_data_path(LINK_CALENDAR_ID)
         _require_vault_local_file(self._vault, settings_path, "Manta Calendar settings")
         manifest = self._installed_manifest(LINK_CALENDAR_ID)
         before = settings_path.read_bytes()
@@ -871,8 +912,9 @@ class ObsidianPluginService:
 
         def operation() -> dict[str, Any]:
             self._require_vault()
-            plugin_id = RUNNABLE_CODE_BLOCKS_ID
-            settings_path = self._plugins / plugin_id / "data.json"
+            target = self._runnable_target()
+            plugin_id = target.plugin_id
+            settings_path = self._plugin_data_path(plugin_id)
             _require_vault_local_file(self._vault, settings_path, "Runnable settings")
             assets: dict[str, str] = {}
             for name in REQUIRED_ASSETS:
@@ -890,8 +932,8 @@ class ObsidianPluginService:
                 raise WoonError("Runnable settings must be a valid JSON object") from error
             if not isinstance(configuration, dict):
                 raise WoonError("Runnable settings must be a JSON object")
-            changed = configuration.get("remoteExecutionEnabled") is not False
-            configuration["remoteExecutionEnabled"] = False
+            changed = target.read(configuration).get("remoteExecutionEnabled") is not False
+            configuration = target.merge(configuration, {"remoteExecutionEnabled": False})
             receipt = {
                 "action": "disable-runnable-remote-execution",
                 "applied": apply,
@@ -899,7 +941,7 @@ class ObsidianPluginService:
                 "before_sha256": before_hash,
                 "plugin": {"id": plugin_id, "version": manifest["version"]},
                 "asset_sha256": assets,
-                "patch": {"remoteExecutionEnabled": False},
+                "patch": target.merge({}, {"remoteExecutionEnabled": False}),
                 "preserved": [
                     "legacy-and-path-settings",
                     "local-execution-and-pairing",
@@ -1022,14 +1064,14 @@ class ObsidianPluginService:
     ) -> dict[str, Any]:
         """Commit a scoped settings change under the caller's mutation lock."""
 
-        settings_path = self._plugins / plugin_id / "data.json"
+        settings_path = self._plugin_data_path(plugin_id)
         content = (
             (json.dumps(configuration, ensure_ascii=False, indent=2) + "\n").encode()
             if receipt["changed"]
             else before
         )
         receipt_id = self._receipt_id()
-        backup = self._local / "backups" / receipt_id / plugin_id / "data.json"
+        backup = self._local / "backups" / receipt_id / plugin_id / DATA_FILE_NAME
         receipt_path = self._local / "receipts" / f"{receipt_id}.json"
         _atomic_write(backup, before)
         _require_unchanged_file(settings_path, before, label)
@@ -1209,6 +1251,8 @@ class ObsidianPluginService:
 
     def _install_one(self, plugin_id: str, backup_root: Path) -> dict[str, Any]:
         official = OFFICIAL_PLUGINS[plugin_id]
+        if official.repository is None:
+            raise WoonError(f"{plugin_id} has no published release; use install-local-build")
         release_url = f"https://api.github.com/repos/{official.repository}/releases/latest"
         try:
             release = json.loads(self._download(release_url).decode("utf-8"))
@@ -1338,6 +1382,15 @@ class ObsidianPluginService:
             raise WoonError("plugin cannot be retired by this migration: " + ", ".join(unknown))
         return list(dict.fromkeys(plugin_ids))
 
+    def _plugin_data_path(self, plugin_id: str) -> Path:
+        """The one place that names a plugin's `data.json` inside the Vault."""
+        return self._plugins / plugin_id / DATA_FILE_NAME
+
+    def _runnable_target(self) -> RunnableTarget:
+        from woon_core.knowledge.runnable_pairing import resolve_runnable_target
+
+        return resolve_runnable_target(self._plugins)
+
     def _installed_manifest(self, plugin_id: str) -> dict[str, Any]:
         manifest_path = self._plugins / plugin_id / "manifest.json"
         try:
@@ -1386,7 +1439,7 @@ class ObsidianPluginService:
             raise WoonError("Manta Calendar must be enabled before retiring the legacy plugin")
         version = manifest["version"]
         asset_hashes = self._require_verified_local_build(LINK_CALENDAR_ID, version)
-        settings_path = self._plugins / LINK_CALENDAR_ID / "data.json"
+        settings_path = self._plugin_data_path(LINK_CALENDAR_ID)
         _require_vault_local_file(self._vault, settings_path, "Manta Calendar settings")
         self._read_json_object(settings_path)
         settings_hash = _sha256(settings_path.read_bytes())

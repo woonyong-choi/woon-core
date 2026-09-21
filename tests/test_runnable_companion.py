@@ -13,16 +13,18 @@ from woon_core.knowledge.obsidian_plugins import ObsidianPluginService
 
 
 @pytest.fixture
-def companion(tmp_path, monkeypatch):
+def companion(request, tmp_path, monkeypatch):
+    plugin_id = getattr(request, "param", "runnable-code-blocks")
     vault = tmp_path / "vault"
-    plugin = vault / ".obsidian/plugins/runnable-code-blocks"
+    plugin = vault / ".obsidian/plugins" / plugin_id
     plugin.mkdir(parents=True)
+    legacy = {"remoteExecutionEnabled": False, "kotlinPath": "/legacy", "custom": {"keep": 42}}
     for name, body in {
-        "manifest.json": json.dumps({"id": "runnable-code-blocks", "version": "0.7.2"}),
+        "manifest.json": json.dumps({"id": plugin_id, "version": "0.7.2"}),
         "main.js": "plugin",
         "styles.css": "style",
         "data.json": json.dumps(
-            {"remoteExecutionEnabled": False, "kotlinPath": "/legacy", "custom": {"keep": 42}}
+            {"locale": "ko", "run": legacy} if plugin_id == "manta" else legacy
         ),
     }.items():
         (plugin / name).write_text(body)
@@ -95,6 +97,7 @@ def companion(tmp_path, monkeypatch):
 
     def runtime(cli_path, name, config):
         assert cli_path == cli and name == "vault"
+        assert config["target"]["plugin_id"] == plugin_id
         assert config["version"] == state.loaded_version
         state.runtime_versions.append(config["version"])
         assert config["settings_sha256"] == module._sha(manager.settings.read_bytes())
@@ -242,6 +245,27 @@ def test_pair_rereads_preserves_legacy_data_and_conflicting_secret(companion):
         ]
         is False
     )
+
+
+@pytest.mark.parametrize("companion", ["manta"], indirect=True)
+def test_pair_routes_through_manta_and_edits_only_its_run_scope(companion):
+    c = companion
+    start(c)
+    plan = c.manager.pair(c.cli, "vault")
+    assert plan["runtime"]["secret_present"] is False
+    result = c.manager.pair(c.cli, "vault", apply=True, expected_state=plan["expected_state"])
+    assert result["runtime_pairing_verified"] is True
+    data = json.loads(c.manager.settings.read_bytes())
+    assert c.manager.settings.parent.name == "manta" and data["locale"] == "ko"
+    assert data["run"] == {
+        "remoteExecutionEnabled": False,
+        "localExecutionEnabled": True,
+        "localRunnerEndpoint": c.state.endpoint,
+        "kotlinPath": "/legacy",
+        "custom": {"keep": 42},
+    }
+    assert "localExecutionEnabled" not in data
+    assert "manta/data.json" in result["backup"]
 
 
 def test_plugin_approvals_preserve_the_existing_companion_across_plugin_updates(companion):

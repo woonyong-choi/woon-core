@@ -18,7 +18,6 @@ from woon_core.errors import WoonError
 from woon_core.io import load_yaml
 from woon_core.knowledge.obsidian_plugins import (
     REQUIRED_ASSETS,
-    RUNNABLE_CODE_BLOCKS_ID,
     _atomic_write,
     _current_file_bytes,
     _require_unchanged_file,
@@ -150,8 +149,9 @@ class RunnableCompanionManager:
         self.service = service
         self.vault = service._vault
         self.root = service._local / "companion"
-        self.config = (home or Path.home()) / ".config/runnable-code-blocks/local-runner.json"
-        self.settings = self.vault / ".obsidian/plugins" / RUNNABLE_CODE_BLOCKS_ID / "data.json"
+        self.target = service._runnable_target()
+        self.config = (home or Path.home()) / self.target.config_path
+        self.settings = service._plugin_data_path(self.target.plugin_id)
         self.state = self.root / "state.json"
         service._require_mutation_boundary()
         if self.root.exists() or self.root.is_symlink():
@@ -224,7 +224,10 @@ class RunnableCompanionManager:
             config = json.loads(raw)
         except ValueError as error:
             raise WoonError("Runnable settings are invalid") from error
-        if not isinstance(config, dict) or config.get("remoteExecutionEnabled") is not False:
+        if (
+            not isinstance(config, dict)
+            or self.target.read(config).get("remoteExecutionEnabled") is not False
+        ):
             raise WoonError("disable remote execution through its policy adapter first")
         return raw
 
@@ -771,7 +774,7 @@ class RunnableCompanionManager:
             path = self.settings.parent / name
             _require_vault_local_file(self.vault, path, "Runnable runtime asset")
             hashes[name] = _sha(path.read_bytes())
-        manifest = self.service._installed_manifest(RUNNABLE_CODE_BLOCKS_ID)
+        manifest = self.service._installed_manifest(self.target.plugin_id)
         if manifest["version"] not in self.plugin_versions:
             raise WoonError("pairing requires the registered plugin release installed and loaded")
         return manifest["version"], hashes
@@ -796,10 +799,10 @@ class RunnableCompanionManager:
         before = self._disk_policy()
         if _sha(before) != status["settings_sha256"]:
             raise WoonError("Runnable settings changed since companion status")
-        selected_secret = json.loads(before).get(
-            "localRunnerSecretId", "runnable-code-blocks-local-runner-token"
+        selected_secret = self.target.read(json.loads(before)).get(
+            "localRunnerSecretId", self.target.secret_id
         )
-        if selected_secret != "runnable-code-blocks-local-runner-token":
+        if selected_secret != self.target.secret_id:
             raise WoonError(
                 "pairing requires the default managed secret selection; "
                 "preserve the selected secret"
@@ -811,6 +814,7 @@ class RunnableCompanionManager:
             "config_path": str(self.config),
             "config_sha256": status["config_sha256"],
             "settings_sha256": _sha(before),
+            "target": self.target.script_config(),
             "mode": "read",
         }
         runtime = runtime_pairing(cli, vault_name, runtime_config)
@@ -832,12 +836,14 @@ class RunnableCompanionManager:
         if expected_state != digest:
             raise WoonError("pairing plan changed or expected-state is missing; replan")
         configuration = json.loads(before)
-        desired = {
-            **configuration,
-            "localExecutionEnabled": True,
-            "remoteExecutionEnabled": False,
-            "localRunnerEndpoint": status["endpoint"],
-        }
+        desired = self.target.merge(
+            configuration,
+            {
+                "localExecutionEnabled": True,
+                "remoteExecutionEnabled": False,
+                "localRunnerEndpoint": status["endpoint"],
+            },
+        )
         if (
             configuration == desired
             and runtime.get("secret_matches") is True
@@ -847,14 +853,20 @@ class RunnableCompanionManager:
             return {**plan, "applied": True, "changed": False, "runtime_pairing_verified": True}
         receipt_id = self.service._receipt_id()
         backup = (
-            self.service._local / "backups" / receipt_id / RUNNABLE_CODE_BLOCKS_ID / "data.json"
+            self.service._local
+            / "backups"
+            / receipt_id
+            / self.target.plugin_id
+            / self.settings.name
         )
         attempt_path = self.root / "attempts" / f"{receipt_id}.json"
         receipt_path = self.service._local / "receipts" / f"{receipt_id}.json"
-        staged = _json({**desired, "localExecutionEnabled": False})
+        staged = _json(self.target.merge(desired, {"localExecutionEnabled": False}))
         final = _json(desired)
         fallback = _json(
-            {**configuration, "localExecutionEnabled": False, "remoteExecutionEnabled": False}
+            self.target.merge(
+                configuration, {"localExecutionEnabled": False, "remoteExecutionEnabled": False}
+            )
         )
         _atomic_write(backup, before)
         attempt: dict[str, Any] = {

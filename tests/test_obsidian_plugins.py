@@ -20,6 +20,7 @@ from woon_core.knowledge.obsidian_plugins import (
     LINK_CALENDAR_VERSION,
     LINKED_GRAPH_ID,
     LINKED_GRAPH_VERSION,
+    MANTA_ID,
     NOTION_BASES_ID,
     PRISMA_CALENDAR_ID,
     RUNNABLE_CODE_BLOCKS_ID,
@@ -155,6 +156,37 @@ def test_disable_runnable_remote_preserves_legacy_settings_and_secrets(
     assert repeated["changed"] is False and settings.read_bytes() == current
     for path in (vault / ".local/woon-knowledge/obsidian-plugins").rglob("*.json"):
         assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_disable_runnable_remote_edits_only_the_run_scope_when_manta_is_installed(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    for plugin_id in (MANTA_ID, RUNNABLE_CODE_BLOCKS_ID):
+        plugin = vault / ".obsidian/plugins" / plugin_id
+        plugin.mkdir()
+        _, assets = _release(plugin_id, "0.2.0", "https://example.invalid")
+        for name, content in assets.items():
+            (plugin / name).write_bytes(content)
+    legacy = vault / ".obsidian/plugins" / RUNNABLE_CODE_BLOCKS_ID / "data.json"
+    legacy.write_text('{"remoteExecutionEnabled": true}\n')
+    manta = vault / ".obsidian/plugins" / MANTA_ID / "data.json"
+    configuration = {"locale": "ko", "run": {"remoteExecutionEnabled": True, "recordOutput": "ask"}}
+    manta.write_text(json.dumps(configuration))
+    service = ObsidianPluginService(vault)
+
+    preview = service.disable_runnable_remote_execution()
+    applied = service.disable_runnable_remote_execution(
+        apply=True, expected_settings_sha256=preview["before_sha256"]
+    )
+
+    assert applied["plugin"]["id"] == MANTA_ID
+    assert applied["patch"] == {"run": {"remoteExecutionEnabled": False}}
+    assert json.loads(manta.read_text()) == {
+        "locale": "ko",
+        "run": {"remoteExecutionEnabled": False, "recordOutput": "ask"},
+    }
+    assert legacy.read_text() == '{"remoteExecutionEnabled": true}\n'
 
 
 @pytest.mark.parametrize(
@@ -659,6 +691,77 @@ def _local_runnable_code_blocks_build(
     subprocess.run(("git", "-C", str(source), "add", "."), check=True)
     subprocess.run(("git", "-C", str(source), "commit", "-q", "-m", "fixture"), check=True)
     return source
+
+
+def _local_manta_build(root: Path, location: str = "OSS/obsidian/manta") -> Path:
+    source = root / location
+    source.mkdir(parents=True)
+    (source / "main.js").write_text("module.exports = {};\n", encoding="utf-8")
+    (source / "manifest.json").write_text(
+        json.dumps(
+            {"id": MANTA_ID, "name": "Manta", "version": "0.2.0", "minAppVersion": "1.13.0"}
+        ),
+        encoding="utf-8",
+    )
+    (source / "styles.css").write_text(".manta-run { display: block; }\n", encoding="utf-8")
+    subprocess.run(("git", "init", "-q", str(source)), check=True)
+    subprocess.run(("git", "-C", str(source), "config", "user.name", "Woon Test"), check=True)
+    subprocess.run(
+        ("git", "-C", str(source), "config", "user.email", "test@example.invalid"), check=True
+    )
+    subprocess.run(("git", "-C", str(source), "add", "."), check=True)
+    subprocess.run(("git", "-C", str(source), "commit", "-q", "-m", "fixture"), check=True)
+    return source
+
+
+def test_manta_local_build_is_approved_by_source_location_without_a_remote(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+
+    receipt = ObsidianPluginService(vault).install_local_build(
+        MANTA_ID, _local_manta_build(tmp_path), "0.2.0"
+    )
+
+    assert receipt["plugin"]["id"] == MANTA_ID
+    assert receipt["plugin"]["source"]["repository"] == "local:OSS/obsidian/manta"
+    assert len(receipt["plugin"]["source"]["head_commit"]) in {40, 64}
+    with pytest.raises(WoonError, match="build source location is not approved"):
+        ObsidianPluginService(_vault(tmp_path / "other")).install_local_build(
+            MANTA_ID, _local_manta_build(tmp_path / "other", "scratch/manta"), "0.2.0"
+        )
+
+
+def test_manta_has_no_official_release_and_status_flags_the_legacy_plugins(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    service = ObsidianPluginService(vault)
+    with pytest.raises(WoonError, match="use install-local-build"):
+        service.install([MANTA_ID])
+    assert service.status()["manta"]["installed"] is False
+
+    service.install_local_build(MANTA_ID, _local_manta_build(tmp_path), "0.2.0")
+    legacy = vault / ".obsidian/plugins" / LINK_CALENDAR_ID
+    legacy.mkdir()
+    (legacy / "manifest.json").write_text(
+        json.dumps({"id": LINK_CALENDAR_ID, "name": "Manta Calendar", "version": "3.3.0"})
+    )
+    (vault / ".obsidian/community-plugins.json").write_text(
+        json.dumps(["homepage", MANTA_ID, LINK_CALENDAR_ID])
+    )
+
+    status = service.status()
+
+    assert status["manta"] == {
+        "installed": True,
+        "enabled": True,
+        "version": "0.2.0",
+        "legacy_installed": [LINK_CALENDAR_ID],
+        "legacy_enabled": [LINK_CALENDAR_ID],
+    }
+    lifecycle = {plugin["id"]: plugin["lifecycle"] for plugin in status["plugins"]}
+    assert lifecycle == {LINK_CALENDAR_ID: "legacy", MANTA_ID: "current"}
 
 
 def _install_link_calendar(vault: Path, build_root: Path) -> ObsidianPluginService:

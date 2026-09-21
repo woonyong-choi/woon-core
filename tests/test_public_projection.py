@@ -883,6 +883,44 @@ def test_fenced_code_is_preserved_while_prose_links_are_projected(
     assert report.receipt == prepare_public_projection(vault, site).receipt
 
 
+def test_manta_run_output_fence_survives_projection_byte_for_byte(tmp_path: Path) -> None:
+    header = (
+        "# 2026-09-05T14:02:00+09:00 · local:companion/gcc 15.1 · exit 0 · sha256:3fa1b2c3d4e5"
+        " · 128ms · sha256full:" + "3fa1b2c3d4e5" * 5 + "abcd · out:3"
+    )
+    # The output prints a triple-backtick line and wikilink-looking text, so Manta widens the fence.
+    record = f"````run-output\n{header}\n```\n[[Wiki/target|출력]]\ncost = [[0]]\n````\n"
+    code = '```run-c\nprintf("hi\\n");\n```\n'
+    body = "[[Wiki/target|앞]]\n\n" + code + record + "\n[[Wiki/target|뒤]]"
+    pages = [
+        _page(
+            page_id="Wiki/example",
+            title="예제",
+            publication_state="publish",
+            access="public",
+            slug="example",
+            body=body,
+        ),
+        _page(
+            page_id="Wiki/target",
+            title="대상",
+            publication_state="publish",
+            access="public",
+            slug="target",
+        ),
+    ]
+    vault, site = _write_fixture(tmp_path, pages)
+
+    report = prepare_public_projection(vault, site)
+    rendered = next(
+        doc.content.decode() for doc in report.documents if doc.page_id == "Wiki/example"
+    )
+
+    assert code + record in rendered
+    assert "[앞](/wiki/target/)" in rendered and "[뒤](/wiki/target/)" in rendered
+    assert report.link_checks == ("Wiki/example:public:Wiki/target",)
+
+
 @pytest.mark.parametrize("literal", ["source_session_id: private", "[원문](../private/book.md)"])
 def test_fenced_literals_do_not_bypass_private_content_checks(tmp_path: Path, literal: str) -> None:
     page = _page(

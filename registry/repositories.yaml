@@ -39,9 +39,15 @@ repositories:
     base: workspace-parent
     directory: OSS/obsidian/manta-code-blocks
     role: obsidian-plugin-source
-  manta:
+  woon-merge:
     context_managed: false
     remote: https://github.com/woonyong-choi/manta.git
+    base: workspace-parent
+    directory: OSS/obsidian/woon-merge
+    role: obsidian-plugin-source
+  manta:
+    context_managed: false
+    local_only: true
     base: workspace-parent
     directory: OSS/obsidian/manta
     role: obsidian-plugin-source

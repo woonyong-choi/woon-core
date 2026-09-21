@@ -108,8 +108,18 @@ Graph 분야색을 탐색 순서와 무관하게 유지하려면 Vault의
 비공개·책·원자료 분류 우선순위는 유지하며 `category_colors` 자체는 `graph.json`에 쓰지 않는다.
 실제 적용은 기존 `--graph-colors --apply`의 colorGroups 전용 backup·receipt·재조회 경로를 따른다.
 
-Runnable 원격 실행만 먼저 차단하려면 다음 설정 adapter를 사용한다. 변경은
-`remoteExecutionEnabled: false` 한 필드이며 기존 legacy/path·local·pairing 설정을 보존한다.
+Runnable 대상 플러그인은 Vault에 설치된 것으로 정한다. Manta(`manta`)가 있으면 항상 Manta가
+우선이고, 옛 `runnable-code-blocks`만 있을 때만 그것을 쓴다. Manta의 실행 설정은 `data.json`의
+`run` 아래에, pairing token은 SecretStorage id `manta-run-local-runner-token`에 있다. 옛 플러그인은
+루트 키와 `runnable-code-blocks-local-runner-token`을 쓴다. companion의
+`~/.config/runnable-code-blocks/local-runner.json`은 두 플러그인이 공유하는 runner 서비스 파일이다.
+`woon knowledge obsidian-plugin status`는 `manta` 블록에 설치·활성 상태와 아직 남은 옛
+플러그인(`link-calendar`, `linked-graph`, `runnable-code-blocks`, `manta-diagrams`)을 보여 주며,
+Manta는 원격 저장소가 없어 `install-local-build`(소스 위치 `OSS/obsidian/manta`)로만 설치한다.
+
+Runnable 원격 실행만 먼저 차단하려면 다음 설정 adapter를 사용한다. 변경은 대상 플러그인의 설정
+범위(Manta는 `run`) 안 `remoteExecutionEnabled: false` 한 필드이며 기존 legacy/path·local·pairing
+설정을 보존한다.
 
 ```bash
 woon knowledge obsidian-plugin disable-runnable-remote-execution --vault /path/to/vault
