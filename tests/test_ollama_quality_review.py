@@ -204,7 +204,10 @@ def test_runs_local_ollama_and_persists_only_valid_result(
     }
     assert '"batch_id":"quality-001"' in payload["prompt"]
     assert payload["format"]["required"] == ["r", "a"]
-    assert payload["format"]["properties"]["r"] == {"type": "string", "pattern": "^[pf]{6}$"}
+    assert payload["format"]["properties"]["r"] == {
+        "type": "string",
+        "pattern": "^[pfu]{6}$",
+    }
     assert '"criterion_order"' in payload["prompt"]
     assert '"anchor_candidates"' in payload["prompt"]
     saved = json.loads((results / "quality-001.result.json").read_text(encoding="utf-8"))
@@ -220,6 +223,19 @@ def test_runs_local_ollama_and_persists_only_valid_result(
     assert run_manifest["model"] == "qwen3:4b-instruct"
     assert run_manifest["context_tokens"] == 32_768
     assert run_manifest["response_tokens"] == ollama_quality_review.DEFAULT_RESPONSE_TOKENS
+
+
+def test_compact_unknown_requires_separate_review_instead_of_becoming_a_pass() -> None:
+    targets = ollama_quality_review._targets(  # noqa: SLF001
+        [{"page_id": "os/first", "output_sha256": "a" * 64, "markdown": MARKDOWN}],
+        "quality-001",
+    )
+    with pytest.raises(WoonError, match="requires separate review for unknown criteria"):
+        ollama_quality_review._expand_local_model_result(  # noqa: SLF001
+            {"r": "u" + "p" * (len(ollama_quality_review.CRITERIA) - 1), "a": [0] * 6},
+            "quality-001",
+            targets,
+        )
 
 
 def test_compiles_local_model_anchor_selection_into_final_evidence(

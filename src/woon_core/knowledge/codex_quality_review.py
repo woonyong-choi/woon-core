@@ -371,17 +371,14 @@ fail이 아니다.
 일반 교과 개념이나 원리 설명은 compiler의 source·claim·receipt 계층이 출처를 소유한다.
 따라서 본문에 inline citation이 없다는 이유만으로 evidence_boundary를 fail로 두지 마라.
 본문이 특정 버전의 실제 실행·측정 결과처럼 말하거나 사실·해석·미결정을 서로 섞을 때만 fail이다.
-`확인 범위:` anchor가 있으면 그 문장을 evidence_boundary의 첫 근거로 선택하고, 본문이 그 범위를
-직접 모순하지 않는 한 pass로 판정하라. 일반 설명을 검증된 실행 결과로 바꾸어 읽지 마라.
-이 예외는 evidence_boundary에만 적용한다. 같은 말을 반복하는 동어반복, 연결 없는 짧은 단문,
+`확인 범위:` anchor는 evidence_boundary의 근거 후보일 뿐이며, 그 존재만으로 pass를 만들지 마라.
+일반 설명을 검증된 실행 결과로 바꾸어 읽지 마라. 같은 말을 반복하는 동어반복, 연결 없는 짧은 단문,
 "이것은 이것이다" 같은 무의미한 문장은 natural_korean을 반드시 fail로 판정하라.
 
-오탐을 막기 위해 결함을 현재 Markdown의 선택한 anchor에서 직접 입증할 수 있을 때만 fail로
-판정한다. 문장이 자연스럽거나 사실·해석의 경계를 위반하지 않는 anchor를 고른 뒤 막연히
-"충분하지 않다"고 평가해서는 안 된다. natural_korean은 선택한 문장 자체의 문법·호응·연결에
-구체적인 결함이 있어야 fail이고, 완전한 의문문·설명문·도입문은 짧다는 이유만으로 fail이 아니다.
-evidence_boundary는 특정 실행·측정·버전 주장과 그 근거 경계가 실제로 충돌하는 문장을 선택할 수
-있을 때만 fail이다. 명확한 결함을 입증하지 못하면 pass로 판정하라.
+선택한 anchor와 판정이 맞지 않거나 근거가 부족하면 pass나 fail을 추정하지 말고 unknown으로
+남겨 별도 재검토 대상으로 보내라. natural_korean은 완전한 의문문·설명문·도입문을 짧다는
+이유만으로 fail로 두지 않는다. evidence_boundary는 실행·측정·버전 주장과 근거 경계를 실제
+문장에서 대조하라. 이 compact 검토가 해결하지 못한 판단은 최종 승인 근거가 아니다.
 
 하나라도 fail이면 해당 페이지 verdict는 needs-revision이다.
 anchor는 페이지에서 실제로 찾은 후보를 골라야 한다.
@@ -409,7 +406,7 @@ def _compact_response_contract(targets: dict[str, ReviewTarget]) -> dict[str, ob
             for page_id, target in sorted(targets.items())
         ],
         "response": {
-            "reviews": [{"r": "pppppp", "a": [0] * len(CRITERIA)} for _ in sorted(targets)]
+            "reviews": [{"r": "uuuuuu", "a": [0] * len(CRITERIA)} for _ in sorted(targets)]
         },
     }
 
@@ -434,7 +431,7 @@ def _response_schema(targets: dict[str, ReviewTarget]) -> dict[str, object]:
                     "additionalProperties": False,
                     "required": ["r", "a"],
                     "properties": {
-                        "r": {"type": "string", "pattern": f"^[pf]{{{len(CRITERIA)}}}$"},
+                        "r": {"type": "string", "pattern": f"^[pfu]{{{len(CRITERIA)}}}$"},
                         "a": {
                             "type": "array",
                             "minItems": len(CRITERIA),
@@ -468,55 +465,8 @@ def _expand_codex_model_result(
             or not isinstance(expanded_reviews[0], dict)
         ):
             raise WoonError("Codex quality review compact entry has an invalid review")
-        _honor_scope_note_evidence_boundary(expanded_reviews[0])
-        _replace_duplicate_anchors(expanded_reviews[0], target)
         reviews.extend(expanded_reviews)
     return {"version": PLAN_VERSION, "batch_id": batch_id, "reviews": reviews}
-
-
-def _honor_scope_note_evidence_boundary(review: dict[str, object]) -> None:
-    """Reject a self-contradictory failure that cites the scope note itself.
-
-    The writing contract says a ``확인 범위:`` note is the primary passing
-    evidence unless another sentence contradicts it.  A reviewer that selects
-    the note itself as the failing anchor has not identified that contradiction.
-    """
-
-    rubric = review.get("rubric")
-    anchors = review.get("evidence_anchors")
-    if not isinstance(rubric, dict) or not isinstance(anchors, dict):
-        return
-    anchor = anchors.get("evidence_boundary")
-    if rubric.get("evidence_boundary") != "fail" or not isinstance(anchor, str):
-        return
-    if not anchor.lstrip().startswith("확인 범위:"):
-        return
-    rubric["evidence_boundary"] = "pass"
-    if all(rubric.get(criterion) == "pass" for criterion in CRITERIA):
-        review["verdict"] = "passed"
-
-
-def _replace_duplicate_anchors(review: dict[str, object], target: ReviewTarget) -> None:
-    anchors = review.get("evidence_anchors")
-    if not isinstance(anchors, dict) or set(anchors) != set(CRITERIA):
-        raise WoonError("Codex quality review compact entry has invalid evidence anchors")
-    candidates = _compact_anchor_candidates({"page": target})
-    used: set[str] = set()
-    for criterion in CRITERIA:
-        anchor = anchors.get(criterion)
-        if not isinstance(anchor, str) or not anchor:
-            raise WoonError("Codex quality review compact entry has an invalid evidence anchor")
-        if anchor in used:
-            replacement = next(
-                (candidate for candidate in candidates[criterion] if candidate not in used),
-                None,
-            )
-            if replacement is not None:
-                anchors[criterion] = replacement
-                anchor = replacement
-        used.add(anchor)
-    if len(used) < 4:
-        raise WoonError("Codex quality review has fewer than four distinct evidence anchors")
 
 
 def _run_codex(

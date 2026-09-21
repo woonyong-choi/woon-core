@@ -345,8 +345,9 @@ def _prompt(batch: dict[str, Any], previous_validation_error: WoonError | None =
         "INPUT DATA\n"
         + payload
         + "\n\nFINAL OUTPUT INSTRUCTIONS\n"
-        + "- 아래 compact_response_contract의 criterion 순서대로 r에 pass는 p, fail은 f를 "
-        "여섯 글자로 넣으세요. 한 기준이라도 f면 최종 verdict는 needs-revision으로 처리됩니다.\n"
+        + "- 아래 compact_response_contract의 criterion 순서대로 r에 pass는 p, fail은 f, "
+        "근거 부족은 u를 여섯 글자로 넣으세요. u는 pass나 내용 결함으로 바꾸지 않고 결과 "
+        "파일을 쓰지 않은 채 별도 재검토가 필요한 응답 오류로 처리됩니다.\n"
         + "- a에는 criterion 순서대로 근거 후보의 0부터 시작하는 번호를 여섯 개 넣으세요. "
         "각 번호는 같은 criterion의 anchor_candidates 범위 안이어야 합니다.\n"
         + "- page_id, hash, 원문 anchor, reason, verdict를 다시 쓰지 마세요. Woon이 immutable "
@@ -469,7 +470,7 @@ def _response_schema(batch_id: str, targets: dict[str, ReviewTarget]) -> dict[st
         "additionalProperties": False,
         "required": ["r", "a"],
         "properties": {
-            "r": {"type": "string", "pattern": f"^[pf]{{{len(CRITERIA)}}}$"},
+            "r": {"type": "string", "pattern": f"^[pfu]{{{len(CRITERIA)}}}$"},
             "a": {
                 "type": "array",
                 "minItems": len(CRITERIA),
@@ -496,7 +497,7 @@ def _compact_response_contract(targets: dict[str, ReviewTarget]) -> dict[str, ob
     return {
         "criterion_order": list(CRITERIA),
         "anchor_candidates": _compact_anchor_candidates(targets),
-        "response": {"r": "pppppp", "a": [0] * len(CRITERIA)},
+        "response": {"r": "uuuuuu", "a": [0] * len(CRITERIA)},
     }
 
 
@@ -513,12 +514,18 @@ def _expand_local_model_result(
         raise WoonError("Ollama quality review compact response must contain only r and a")
     states = result["r"]
     indexes = result["a"]
-    if not isinstance(states, str) or len(states) != len(CRITERIA) or set(states) - {"p", "f"}:
-        raise WoonError("Ollama quality review compact rubric must be six p or f characters")
+    if not isinstance(states, str) or len(states) != len(CRITERIA) or set(states) - {"p", "f", "u"}:
+        raise WoonError("Ollama quality review compact rubric must be six p, f, or u characters")
     if not isinstance(indexes, list) or len(indexes) != len(CRITERIA):
         raise WoonError("Ollama quality review compact anchors must contain six indexes")
     page_id, target = next(iter(sorted(targets.items())))
     candidates = _compact_anchor_candidates(targets)
+    unknown = [criterion for criterion, state in zip(CRITERIA, states, strict=True) if state == "u"]
+    if unknown:
+        raise WoonError(
+            "Ollama quality review compact response requires separate review for unknown criteria: "
+            + ", ".join(unknown)
+        )
     rubric = {
         criterion: "pass" if state == "p" else "fail"
         for criterion, state in zip(CRITERIA, states, strict=True)

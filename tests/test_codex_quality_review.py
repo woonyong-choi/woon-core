@@ -106,14 +106,13 @@ def test_review_prompt_uses_compiler_provenance_without_requiring_inline_citatio
     )
 
     assert "inline citation이 없다는 이유만으로" in prompt
-    assert "`확인 범위:` anchor" in prompt
-    assert "막연히" in prompt
-    assert "명확한 결함을 입증하지 못하면 pass" in prompt
+    assert "그 존재만으로 pass를 만들지 마라" in prompt
+    assert "pass나 fail을 추정하지 말고 unknown" in prompt
     assert "`정리`, `이어서 읽기`" in prompt
     assert "`… 코드`, `… 필요성`, `… 개요`" in prompt
 
 
-def test_scope_note_cannot_be_its_own_failing_evidence_boundary() -> None:
+def test_scope_note_does_not_override_the_reviewers_failure() -> None:
     markdown = MARKDOWN.replace(
         "# 첫 문서", "# 첫 문서\n\n> 확인 범위: 일반 원리만 설명하며 실행 결과는 별도로 검증한다."
     )
@@ -133,8 +132,19 @@ def test_scope_note_cannot_be_its_own_failing_evidence_boundary() -> None:
     )
     review = expanded["reviews"][0]
 
-    assert review["rubric"]["evidence_boundary"] == "pass"
-    assert review["verdict"] == "passed"
+    assert review["rubric"]["evidence_boundary"] == "fail"
+    assert review["verdict"] == "needs-revision"
+
+
+def test_compact_unknown_requires_separate_review_in_codex_path() -> None:
+    target = {"markdown": MARKDOWN, "output_sha256": "a" * 64}
+
+    with pytest.raises(WoonError, match="requires separate review for unknown criteria"):
+        codex_quality_review._expand_codex_model_result(  # noqa: SLF001
+            _compact({"os/first": target}, "u" + "p" * 5),
+            "quality-001",
+            {"os/first": target},
+        )
 
 
 def _calibration() -> dict[str, object]:
