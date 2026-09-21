@@ -1,13 +1,126 @@
 # woon-core
 
-경로에 종속되지 않는 Python 기반 Woon 제어 도구다. 저장소와 AI 지침을 관리하고, private Markdown 정본을 MCP로 검색·갱신·복구한다.
+여러 저장소에 흩어진 개인 개발 환경 — AI 지침·스킬 카탈로그·IDE 설정·Markdown 지식 정본 — 을 하나의 CLI에서 결정적으로 생성·검증·복구하는 control plane.
 
-실제 운영 대상은 macOS다. Obsidian 로컬 자동화와 POSIX 파일 권한
-계약은 macOS에서 검증하며, Linux는 전체 회귀 테스트를 위한 동일 POSIX 환경으로
-사용한다. Windows는 패키지 설치·정적 검사·timezone 데이터·빌드 호환성까지만
-지원하고, POSIX 권한 동작은 지원 대상으로 주장하지 않는다.
+## Woon이 무엇인가
 
-## 주요 기능
+Woon은 한 사람의 개발·학습 환경 전체를 파일로 고정해 두고, 사람의 기억이 아니라 도구가 그 상태를 재현하게 만든 시스템이다. `woon-core`(제어 도구)·`woon-skills`(AI 스킬 카탈로그)·`woon-env`(IDE 설정)·`woon-knowledge`(private Markdown 정본) 네 저장소가 하나의 workspace root 아래에서 `repo://` URI로 서로를 참조하고, 같은 입력이면 항상 같은 산출물이 나오도록 생성과 검증을 분리한다. 이 저장소는 그 control plane이고, 나머지 저장소는 입력 데이터이거나 생성된 산출물이다.
+
+## 데모
+
+```console
+$ woon --version
+0.5.6
+
+$ woon --root <workspace-root> doctor
+status: ok
+root: <workspace-root>
+source: --root+config+.woon-root
+repositories: 12
+missing: 0
+```
+
+`root`는 실제 실행에서 로컬 절대경로로 출력된다. 위 예시는 그 자리만 `<workspace-root>`로 바꾼 것이고 나머지는 `woon doctor`의 실제 출력이다.
+
+## 문제와 목표
+
+AI 도구가 늘어나면서 같은 규칙이 Codex `AGENTS.md`, Claude `CLAUDE.md`, Copilot 지침에 각각 복사되고, IDE 설정과 스킬 정의가 기기마다 갈라지고, 정리한 지식이 대화 로그로만 남는 문제가 생겼다. 목표는 세 가지다.
+
+- **단일 정본**: 정책·표준·스킬·지식은 한 곳에만 쓰고, 도구별 파일은 전부 생성물로 만든다.
+- **결정성**: 생성은 입력 hash에 대해 결정적이고, `check` 계열 명령이 drift를 실패로 만든다.
+- **안전한 경계**: private 정본은 로컬에만 두고, 공개 투영은 승인된 페이지만 별도 명령으로 내보낸다.
+
+## 결과
+
+| 항목 | 값 | 재현 |
+| --- | --- | --- |
+| 테스트 | 1,630개 중 1,624개 통과 | `uv run pytest -q` |
+| 구현 / 테스트 코드 | 131 파일 77,119줄 / 93 파일 49,159줄 | `git ls-files 'src/**/*.py' \| xargs wc -l` |
+| 관리 저장소 | 12개 | [`registry/repositories.yaml`](registry/repositories.yaml) |
+| 스킬 카탈로그 | 86개, metadata·link·catalog drift 검사 통과 | `python scripts/audit_skills.py` (woon-skills) |
+| 공개 위키 투영 | 1,346쪽 (본문 완료 195쪽) | `woon knowledge public-projection` |
+| 비밀값 스캔 | 전체 이력에서 0건 | `gitleaks detect --source . --log-opts="--all"` |
+
+남은 6개 실패는 코드 결함이 아니라 `pdftoppm`(poppler) 미설치 환경에서 스캔 crop 검증 테스트가 전제 조건을 만족하지 못해 발생한다. `brew install poppler` 후 다시 실행하면 사라진다.
+
+## 실행 방법
+
+Python 3.12 이상과 [`uv`](https://docs.astral.sh/uv/)가 필요하다. 아래 다섯 줄이 설치부터 첫 실행까지 전부다.
+
+```bash
+uv tool install git+https://github.com/woonyong-choi/woon-core.git
+woon init --root ~/workspace/woon      # workspace root와 .woon-root 생성
+woon repo sync                          # registry의 저장소를 clone
+woon doctor                             # root·registry·누락 저장소 확인
+woon context check --all                # 생성된 AI 지침이 정본과 일치하는지 검사
+```
+
+개발 checkout에서는 `uv sync --all-extras --dev` 후 `uv run woon ...`으로 같은 명령을 쓴다.
+
+## 설계
+
+### 구성 요소와 관계
+
+```mermaid
+flowchart LR
+    subgraph src["정본 · 입력"]
+        direction TB
+        STD["standards · policies · registry<br/>(woon-core)"]
+        SKILLS["woon-skills<br/>스킬 카탈로그"]
+        ENV["woon-env<br/>IDE 설정"]
+    end
+
+    subgraph plane["woon-core — control plane"]
+        direction TB
+        RES["repo:// resolver<br/>workspace root 탐색"]
+        CLI["woon CLI<br/>context · env · skills<br/>knowledge · tasks · people · career"]
+        MCP["stdio MCP<br/>knowledge · tasks · people"]
+    end
+
+    KNOW["woon-knowledge<br/>Markdown 지식 정본 · private"]
+
+    subgraph out["산출물"]
+        direction TB
+        INSTR["AGENTS.md · CLAUDE.md<br/>copilot-instructions.md"]
+        IDE["VS Code · JetBrains<br/>settings · keymap"]
+        OBS["Obsidian vault<br/>Manta 플러그인 · 테마"]
+        PAGES["woonyong-kr.github.io<br/>generated/public-content"]
+    end
+
+    AGENT["AI 에이전트<br/>Codex · Claude"]
+
+    STD --> RES
+    SKILLS --> RES
+    ENV --> RES
+    RES --> CLI
+    CLI --> MCP
+    CLI -- "context generate / check" --> INSTR
+    CLI -- "env generate / apply" --> IDE
+    CLI -- "knowledge compile" --> KNOW
+    MCP -- "검색 · 갱신 · revision 검사" --> KNOW
+    KNOW -- "public-projection<br/>승인된 페이지만" --> PAGES
+    KNOW <--> OBS
+    INSTR --> AGENT
+    SKILLS -. "설치" .-> AGENT
+    AGENT --> MCP
+
+    classDef privateNode stroke-dasharray: 4 3
+    class ENV,KNOW privateNode
+```
+
+점선 테두리는 공개하지 않는 저장소다. `woon-knowledge`는 개인 기록을 포함하므로 저장소 자체는 공개하지 않고, 승인한 페이지만 `public-projection`으로 위키 사이트에 투영한다.
+
+### 핵심 결정과 트레이드오프
+
+| 결정 | 이유 | 대가 |
+| --- | --- | --- |
+| 도구별 지침 파일을 전부 생성물로 취급 | 규칙이 한 곳에만 존재하고 drift가 CI에서 실패로 드러난다 | 지침을 손으로 고치면 다음 `generate`에서 사라진다 |
+| `repo://` URI로 저장소 간 참조 | 기기마다 다른 절대경로가 커밋되지 않는다 | resolver를 거치지 않는 외부 도구는 직접 못 읽는다 |
+| private 정본과 공개 투영을 다른 명령으로 분리 | 공개 범위가 기본값이 아니라 명시적 승인이 된다 | 위키 페이지를 하나 늘릴 때마다 투영 단계가 필요하다 |
+| 지식 갱신을 MCP port 뒤에 둠 | 에이전트가 파일시스템을 직접 쓰지 않고 revision 검사를 거친다 | document·search·history port 세 개를 계속 유지해야 한다 |
+| 쓰기 전 optimistic revision 검사 | 두 에이전트가 같은 문서를 동시에 고칠 때 조용한 덮어쓰기를 막는다 | 호출자가 현재 revision을 먼저 읽어야 한다 |
+
+### 주요 기능
 
 - 충돌을 허용하지 않는 workspace root 탐색
 - 저장소 ID와 `repo://` URI 기반 경로 해석
@@ -21,23 +134,37 @@
 - 교체 가능한 document, search, history port와 local stdio MCP
 - 검토한 Codex root·하위 작업의 공식 영구 삭제, 개별 응답·알림과 전체 목록 재조회 receipt
 
+### 지원 범위
+
+실제 운영 대상은 macOS다. Obsidian 로컬 자동화와 POSIX 파일 권한 계약은 macOS에서 검증하며, Linux는 전체 회귀 테스트를 위한 동일 POSIX 환경으로 사용한다. Windows는 패키지 설치·정적 검사·timezone 데이터·빌드 호환성까지만 지원하고, POSIX 권한 동작은 지원 대상으로 주장하지 않는다.
+
 Codex 작업 삭제는 `python -m woon_core.environment.codex_thread_review plan`으로 준비하고
 `python -m woon_core.environment.codex_thread_delete`에서 exact plan/review hash와 전체 내용
 검토, 보호 ID, 최신 실제 Desktop 근거를 확인한다. 기본은 preview이며 명시적 `--apply`만
 공식 삭제를 호출한다. [입력 schema와 실행 절차](repo://skills/skills/common/safety/references/codex-thread-delete.md)를
 따르며, 부분 실패나 불확실한 삭제는 자동 재시도하지 않는다.
 
-## 설치
+## 검증
 
-Python 3.12 이상과 `uv`를 사용한다. GitHub 저장소에서 CLI와 MCP를 설치한다.
+[![CI](https://github.com/woonyong-choi/woon-core/actions/workflows/ci.yml/badge.svg)](https://github.com/woonyong-choi/woon-core/actions/workflows/ci.yml)
 
 ```bash
-uv tool install git+https://github.com/woonyong-choi/woon-core.git
+uv run pytest -q          # 단위·계약 테스트 1,630개
+uv run mypy src           # 정적 타입
+uv run ruff check src tests   # lint
+woon context check --all  # 생성된 지침의 drift 검사
 ```
 
-개발 checkout에서는 `uv sync --all-extras --dev`를 사용한다.
+스캔 crop 테스트에는 `pdftoppm`(poppler), 문서 intake 테스트에는 Docling extra가 필요하다.
 
-## 사용법
+## 배운 점과 한계
+
+- 생성물과 정본을 파일 수준에서 나누면 규칙 충돌이 리뷰가 아니라 CI 실패로 드러난다. 대신 "손으로 고치면 날아간다"는 사실을 문서에 계속 적어야 한다.
+- 결정성은 정렬·타임스탬프·경로 정규화를 전부 고정해야 얻어진다. 한 군데라도 dict 순서에 의존하면 hash가 흔들린다.
+- 한계: 단일 사용자·단일 기기 전제로 설계했고 동시 편집은 optimistic revision 검사까지만 막는다. 공개 투영은 페이지 단위 승인이라 대량 공개에는 아직 느리다.
+- 한계: 공개 위키 1,346쪽 중 본문이 있는 페이지는 195쪽이고 나머지는 키워드만 등록된 상태다.
+
+## 전체 명령
 
 ```bash
 woon init --root /path/to/woon
