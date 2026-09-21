@@ -1,19 +1,19 @@
 version: 1
 repositories:
   core:
-    remote: https://github.com/woonyong-kr/woon-core.git
+    remote: https://github.com/woonyong-choi/woon-core.git
     directory: woon-core
     role: control-plane
   skills:
-    remote: https://github.com/woonyong-kr/woon-skills.git
+    remote: https://github.com/woonyong-choi/woon-skills.git
     directory: woon-skills
     role: skill-catalog
   env:
-    remote: https://github.com/woonyong-kr/woon-env.git
+    remote: https://github.com/woonyong-choi/woon-env.git
     directory: woon-env
     role: environment
   knowledge:
-    remote: https://github.com/woonyong-kr/woon-knowledge.git
+    remote: https://github.com/woonyong-choi/woon-knowledge.git
     directory: woon-knowledge
     role: knowledge
   obsidian-theme:
@@ -52,12 +52,12 @@ repositories:
     directory: OSS/obsidian/manta
     role: obsidian-plugin-source
   profile-output:
-    remote: https://github.com/woonyong-kr/woonyong-kr.git
+    remote: https://github.com/woonyong-choi/woonyong-choi.git
     directory: woonyong-kr
     role: generated-profile
     output: true
   pages-output:
-    remote: https://github.com/woonyong-kr/woonyong-kr.github.io.git
+    remote: https://github.com/woonyong-choi/woonyong-kr.github.io.git
     directory: woonyong-kr.github.io
     role: generated-pages
     output: true

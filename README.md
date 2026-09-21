@@ -32,7 +32,7 @@ Codex 작업 삭제는 `python -m woon_core.environment.codex_thread_review plan
 Python 3.12 이상과 `uv`를 사용한다. GitHub 저장소에서 CLI와 MCP를 설치한다.
 
 ```bash
-uv tool install git+https://github.com/woonyong-kr/woon-core.git
+uv tool install git+https://github.com/woonyong-choi/woon-core.git
 ```
 
 개발 checkout에서는 `uv sync --all-extras --dev`를 사용한다.
