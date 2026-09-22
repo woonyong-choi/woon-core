@@ -38,7 +38,7 @@ AI 도구가 늘어나면서 같은 규칙이 Codex `AGENTS.md`, Claude `CLAUDE.
 | 구현 / 테스트 코드 | 131 파일 77,119줄 / 93 파일 49,159줄 | `git ls-files 'src/**/*.py' \| xargs wc -l` |
 | 관리 저장소 | 12개 | [`registry/repositories.yaml`](registry/repositories.yaml) |
 | 스킬 카탈로그 | 86개, metadata·link·catalog drift 검사 통과 | `python scripts/audit_skills.py` (woon-skills) |
-| 공개 위키 투영 | 1,346쪽 (본문 완료 195쪽) | `woon knowledge public-projection` |
+| 공개 위키 투영 | 240쪽 (본문 완료 195쪽) | `woon knowledge public-projection` |
 | 비밀값 스캔 | 전체 이력에서 0건 | `gitleaks detect --source . --log-opts="--all"` |
 
 남은 6개 실패는 코드 결함이 아니라 `pdftoppm`(poppler) 미설치 환경에서 스캔 crop 검증 테스트가 전제 조건을 만족하지 못해 발생한다. `brew install poppler` 후 다시 실행하면 사라진다.
@@ -162,7 +162,7 @@ woon context check --all  # 생성된 지침의 drift 검사
 - 생성물과 정본을 파일 수준에서 나누면 규칙 충돌이 리뷰가 아니라 CI 실패로 드러난다. 대신 "손으로 고치면 날아간다"는 사실을 문서에 계속 적어야 한다.
 - 결정성은 정렬·타임스탬프·경로 정규화를 전부 고정해야 얻어진다. 한 군데라도 dict 순서에 의존하면 hash가 흔들린다.
 - 한계: 단일 사용자·단일 기기 전제로 설계했고 동시 편집은 optimistic revision 검사까지만 막는다. 공개 투영은 페이지 단위 승인이라 대량 공개에는 아직 느리다.
-- 한계: 공개 위키 1,346쪽 중 본문이 있는 페이지는 195쪽이고 나머지는 키워드만 등록된 상태다.
+- 한계: 공개 위키 240쪽 중 본문이 있는 페이지는 195쪽이고 나머지는 키워드만 등록된 상태다. 이전 1,346쪽은 사이트 빌드가 버리던 planned 키워드 stub을 포함한 수치이며, `ecf9216`에서 투영 단계가 직접 제외하도록 바꿔 실제 렌더링되는 문서 수와 같아졌다.
 
 ## 전체 명령
 
@@ -540,6 +540,11 @@ writer 창에서 `woon career jobs-base --vault /path/to/vault`를 실행하면 
 | `document-status` | `candidate_id` | 추출물 삭제 후에도 Docling terminal 영수증 조회 |
 | `document-cleanup` | `candidate_id`, `expected_resolution_sha256` | 종결된 Docling 변환의 hash가 일치하는 파일만 제거; 사용자 추가 파일은 보존하며 중단 |
 | `source-body-plan` | `source_ids`, `protected_source_ids`, `reviewed_successors`, `review_reference` | 공개 생성 문서의 과거 source 본문 축소 계획만 반환; catalog 쓰기 없음 |
+| `source-body-apply` | `plan_path` | `source-body-plan` JSON을 writer lock 아래 적용; catalog 4개 hash·record hash가 계획과 다르면 거부 |
+| `retention-timestamps-plan` | `dates` 또는 `source_ids`/`claim_ids` (Git `-S` 근사로 날짜 추정) | archived source `archived_at`·superseded claim `superseded_at` 추가 계획만 반환 |
+| `retention-timestamps-apply` | `plan_path` | 위 계획을 hash 검증 후 적용 |
+| `retention-plan` | 선택 `older_than_days`(365), `limit`(24), `protected_source_ids` | `archived_at`이 오래됐고 현재 참조가 없으며 terminal successor가 참조되는 공개 source만 골라 축소 계획 반환; claim markdown은 다루지 않음 |
+| `retention-apply` | `plan_path` | `retention-plan` JSON 적용 (`source-body-apply`와 동일 검증) |
 | `review-status` | `relative_path`, `source_sha256` | 삭제한 기존 Review 카드의 완료 상태 조회 |
 | `review-complete` | 위 필드와 `disposition: integrated\|obsolete`, `review_reference` | 실제 의미 보존·전제 소멸을 검토한 정확한 card만 제거하고 동일 입력의 재생성을 억제 |
 
