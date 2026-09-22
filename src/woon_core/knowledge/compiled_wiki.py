@@ -73,6 +73,7 @@ from woon_core.knowledge.source_boundary import (
 from woon_core.knowledge.source_compaction import (
     compact_reference_errors,
     validate_compacted_source,
+    validate_utc_timestamp,
 )
 from woon_core.knowledge.wiki_tree import (
     WikiTreeReport,
@@ -8097,6 +8098,9 @@ def _validate_source(source: dict[str, Any]) -> None:
             _required_string(source, "superseded_by")
     elif "superseded_by" in source:
         raise WoonError("only archived source may declare superseded_by")
+    if "archived_at" in source and lifecycle != "archived":
+        raise WoonError("only archived source may declare archived_at")
+    validate_utc_timestamp(source, "archived_at")
     if source.get("kind") != "legacy-wiki":
         _required_string(source, "purpose")
     archive_origin = source.get("archive_origin")
@@ -8225,6 +8229,9 @@ def _validate_claim_record(claim: dict[str, Any]) -> None:
             _required_string(claim, "superseded_by")
     elif "superseded_by" in claim:
         raise WoonError("only superseded claim may declare superseded_by")
+    if "superseded_at" in claim and status != "superseded":
+        raise WoonError("only superseded claim may declare superseded_at")
+    validate_utc_timestamp(claim, "superseded_at")
     _string_list(claim.get("source_ids"), "claim source_ids")
     if not isinstance(claim.get("markdown"), str):
         raise WoonError("claim markdown must be a string")
