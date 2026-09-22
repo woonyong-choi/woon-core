@@ -3,9 +3,11 @@
 # Each query is phrased the way the question would actually be asked and is drawn
 # from a real Wiki page's body rather than its title, so a hit has to come from
 # the indexed prose instead of a title keyword match. Every query has exactly one
-# correct answer; `expected` is the page path relative to the Wiki root. Topics
-# whose vocabulary a sibling page shares (patch embedding vs. the Vision
-# Transformer overview, SVD/PCA vs. matrix decomposition) are left out on purpose.
+# correct answer; `expected` is the page path relative to the Wiki root.
+#
+# The set has two halves. The first 20 avoid topics whose vocabulary a sibling
+# page shares. The second 20 deliberately target them, because a query set that
+# scores P@1 1.00 cannot detect a ranking regression: it has no room to fall.
 version: 1
 queries:
   - query: 동전을 세 번 던져 모두 앞면일 때 사전분포로 극단적인 추정을 완화하는 방법
@@ -48,3 +50,49 @@ queries:
     expected: backend/web-workers.md
   - query: 매 스텝의 최선이 전체 문장의 최선으로 이어지지 않을 때 후보를 여러 개 유지하기
     expected: ai/beam-search-decoding.md
+
+  # Hard set. Each of these is written against a page that shares most of its
+  # vocabulary with a sibling, is phrased with synonyms rather than the words the
+  # page uses in its title, and asks about a sentence well inside the body. The
+  # point is to make P@1 fall below 1.00 so a ranking or chunking regression has
+  # something to move.
+  - query: 80GB 카드인데 동시에 네 요청밖에 못 받는 이유를 층 수와 임베딩 차원으로 따져 보기
+    expected: ai/kv-cache-memory-calculation.md
+  - query: 대각선 바로 윗자리부터 -무한대로 바꾸는 불리언 행렬을 만들 때 대각선을 어디에 둘지
+    expected: ai/causal-mask.md
+  - query: 후보 박스를 미리 깔지 않고 물체 한가운데를 heatmap으로 찍은 뒤 네 방향 경계까지 거리를 재는 방식
+    expected: ai/anchor-free-detection.md
+  - query: 조각 크기와 겹침과 가져올 개수를 따로 정하면 안 되는 이유
+    expected: ai/chunking-retrieval-strategies.md
+  - query: 채점자를 먼저 만들어 점수를 올리는 길과 비교 데이터로 정책을 바로 고치는 길 가운데 구현 부담이 적은 쪽
+    expected: ai/dpo-vs-rlhf.md
+  - query: 질의 헤드는 32개 그대로 두고 키와 값 헤드만 하나로 줄이는 가장 공격적인 공유 구조
+    expected: ai/multi-query-attention.md
+  - query: 중심을 0으로 옮기는 단계를 건너뛰고 원소 제곱 평균의 제곱근으로만 크기를 맞추는 정규화
+    expected: ai/rmsnorm.md
+  - query: 224 크기 컬러 이미지를 16으로 자르면 입력 열 길이가 197이 되는 계산
+    expected: ai/vit-patch-embedding.md
+  - query: 784 곱하기 256처럼 정방이 아닌 가중치를 회전과 스케일과 회전 세 조각으로 나누는 방법
+    expected: ai/matrix-decomposition-svd-pca.md
+  - query: 위치 벡터를 입력에 더하지 않고 질의와 키를 위치만큼 돌려 점곱에 위치 차이를 남기는 방법
+    expected: ai/rotary-position-embedding.md
+  - query: BERT는 생성을 못 하고 T5에는 Cross-Attention이 있는 이유를 블록 구조로 구분
+    expected: ai/encoder-block-structure.md
+  - query: 7B를 반정밀도로 올리면 14GB인데 16GB 한 장에서 학습하려고 본체만 4비트로 눌러 두는 방법
+    expected: ai/qlora-quantized-lora.md
+  - query: 가중치를 0으로 만들어도 dense 커널이 그대로 곱해서 실행 시간이 줄지 않는 경우
+    expected: ai/structured-unstructured-pruning.md
+  - query: 최대 길이만큼 미리 잡아 둔 자리가 안쪽과 바깥쪽 양쪽으로 남아도는 문제를 고정 크기 블록 매핑으로 다루기
+    expected: ai/paged-attention.md
+  - query: 프롬프트를 한꺼번에 읽는 구간과 한 토큰씩 잇는 구간의 병목이 서로 다른 이유
+    expected: ai/prefill-decode-phases.md
+  - query: 디코더와 인코더 상태가 같은 공간에 있다면 tanh 신경망 없이 바로 내적해도 되지 않느냐는 발상
+    expected: ai/luong-attention.md
+  - query: 별도의 cell state 없이 은닉 상태 하나만 유지하면서 유지와 갱신을 게이트로 조절하는 셀
+    expected: ai/gru-cell-structure.md
+  - query: 질문 유형에 따라 키워드 검색과 벡터 검색과 SQL 조회 가운데 하나를 router가 고르는 구조
+    expected: ai/modular-rag.md
+  - query: 실행 함수와 읽어 들일 자료와 재사용 양식으로 서버가 주는 능력을 셋으로 나누는 기준
+    expected: ai/mcp-tool-resource-prompt.md
+  - query: 톨게이트 옆에 우회 차선을 놓는 비유로 96층에서도 앞쪽 가중치가 학습되게 하는 구조
+    expected: ai/shortcut-connection.md
