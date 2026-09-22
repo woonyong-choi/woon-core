@@ -31,10 +31,11 @@ PRIVATE_DIRECTORY = "private"
 
 @dataclass(frozen=True, slots=True)
 class BenchQuery:
-    """One benchmark question and the single Wiki document that answers it."""
+    """One benchmark question, the single page that answers it, and where."""
 
     query: str
     expected: str
+    evidence: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,7 @@ class BenchQueryResult:
 
     query: str
     expected: str
+    evidence: str
     hit_rank: int | None
     elapsed_ms: float
     document_chars: int
@@ -62,6 +64,7 @@ class BenchReport:
     limit: int
     precision_at_1: float
     precision_at_5: float
+    mean_reciprocal_rank: float
     mean_elapsed_ms: float
     mean_document_chars: float
     mean_section_chars: float
@@ -85,12 +88,16 @@ def load_bench_queries(path: Path) -> tuple[BenchQuery, ...]:
             raise WoonError("each benchmark query must be a mapping")
         text = str(entry.get("query", "")).strip()
         expected = str(entry.get("expected", "")).strip()
-        if not text or not expected:
-            raise WoonError("each benchmark query needs 'query' and 'expected'")
+        # The evidence line names the section that answers the query. It is
+        # required so a golden label can be rechecked against the page instead
+        # of being taken on trust when a later run disagrees with this one.
+        evidence = str(entry.get("evidence", "")).strip()
+        if not text or not expected or not evidence:
+            raise WoonError("each benchmark query needs 'query', 'expected' and 'evidence'")
         if text in seen:
             raise WoonError(f"benchmark query is duplicated: {text}")
         seen.add(text)
-        queries.append(BenchQuery(text, expected))
+        queries.append(BenchQuery(text, expected, evidence))
     if not queries:
         raise WoonError("benchmark query file contains no queries")
     return tuple(queries)
@@ -182,6 +189,7 @@ def run_search_bench(
             BenchQueryResult(
                 query=query.query,
                 expected=query.expected,
+                evidence=query.evidence,
                 hit_rank=rank,
                 elapsed_ms=round(elapsed_ms, 3),
                 document_chars=body_chars[query.expected],
@@ -201,6 +209,9 @@ def run_search_bench(
         limit=limit,
         precision_at_1=_ratio(sum(1 for item in results if item.hit_rank == 1), total),
         precision_at_5=_ratio(len(found), total),
+        mean_reciprocal_rank=_mean(
+            0.0 if item.hit_rank is None else 1 / item.hit_rank for item in results
+        ),
         mean_elapsed_ms=_mean(item.elapsed_ms for item in results),
         mean_document_chars=_mean(item.document_chars for item in found),
         mean_section_chars=_mean(item.section_chars for item in found),
@@ -220,6 +231,7 @@ def format_bench_table(report: BenchReport) -> str:
         "| --- | --- |",
         f"| P@1 | {report.precision_at_1:.2f} |",
         f"| P@5 | {report.precision_at_5:.2f} |",
+        f"| MRR | {report.mean_reciprocal_rank:.2f} |",
         f"| 평균 소요 ms | {report.mean_elapsed_ms:.2f} |",
         f"| 문맥 문자 수 (전체) | {report.mean_document_chars:.0f} |",
         f"| 문맥 문자 수 (절) | {report.mean_section_chars:.0f} |",

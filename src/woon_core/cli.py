@@ -3250,6 +3250,7 @@ Measure retrieval quality and reading cost against a fixed query set.
 
   --queries PATH      query set YAML (default: bench/knowledge-queries.yaml)
   --wiki PATH         Wiki root to index (default: <knowledge vault>/wiki)
+  --vault PATH        knowledge vault whose wiki/ is indexed
   --results-dir PATH  where the run is recorded (default: bench/results)
   --limit N           results considered per query (default: 5)
   --no-write          print the table without recording a result file
@@ -3281,7 +3282,7 @@ def _run_knowledge_search_bench(arguments: list[str], output: TextIO) -> None:
     index = 0
     while index < len(remaining):
         option = remaining[index]
-        if option not in {"--queries", "--wiki", "--results-dir", "--limit"}:
+        if option not in {"--queries", "--wiki", "--vault", "--results-dir", "--limit"}:
             raise WoonError(f"unexpected knowledge bench argument: {option}")
         if index + 1 >= len(remaining) or option in values:
             raise WoonError(f"{option} requires exactly one value")
@@ -3290,11 +3291,14 @@ def _run_knowledge_search_bench(arguments: list[str], output: TextIO) -> None:
 
     queries_path = Path(values.get("--queries", "bench/knowledge-queries.yaml")).expanduser()
     results_dir = Path(values.get("--results-dir", "bench/results")).expanduser()
-    wiki_root = (
-        Path(values["--wiki"]).expanduser().resolve()
-        if "--wiki" in values
-        else resolve_knowledge_vault() / "wiki"
-    )
+    if "--wiki" in values and "--vault" in values:
+        raise WoonError("knowledge bench takes either --wiki or --vault, not both")
+    if "--wiki" in values:
+        wiki_root = Path(values["--wiki"]).expanduser().resolve()
+    elif "--vault" in values:
+        wiki_root = Path(values["--vault"]).expanduser().resolve() / "wiki"
+    else:
+        wiki_root = resolve_knowledge_vault() / "wiki"
     try:
         limit = int(values.get("--limit", DEFAULT_LIMIT))
     except ValueError as error:
