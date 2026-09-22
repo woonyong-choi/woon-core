@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from woon_core.errors import WoonError
+from woon_core.knowledge.adapters.sqlite_search import SQLiteFtsSearchIndex
 from woon_core.knowledge.search_bench import (
     load_bench_queries,
     read_wiki_documents,
@@ -77,12 +78,62 @@ def test_expected_document_outside_the_wiki_is_rejected(tmp_path: Path, wiki: Pa
         run_search_bench(wiki, queries, tmp_path / "bench.sqlite3")
 
 
+def test_a_query_without_its_evidence_line_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "unsourced.yaml"
+    path.write_text(
+        "version: 1\nqueries:\n  - query: 근거 없는 질의\n    expected: a.md\n", encoding="utf-8"
+    )
+    with pytest.raises(WoonError, match="evidence"):
+        load_bench_queries(path)
+
+
+def test_a_real_vault_page_returns_its_neighbour_sections(tmp_path: Path) -> None:
+    """The neighbour window has to hold on real Wiki prose, not only fixtures.
+
+    Fixture pages are short and regular; vault pages carry code fences, tables
+    and sections long enough to be split again. This indexes one real page and
+    asks for the sections either side of a hit.
+    """
+
+    wiki = _vault_wiki_or_skip()
+    document = next(
+        (item for item in read_wiki_documents(wiki) if item.body.count("\n## ") >= 3), None
+    )
+    assert document is not None, "vault has no page with three sections"
+    index = SQLiteFtsSearchIndex(tmp_path / "vault.sqlite3")
+    index.rebuild([document])
+
+    hits = index.search(document.title, 5)
+    excerpts = [index.read_excerpt(hit.document_id, hit.chunk_id, 1, 1) for hit in hits]
+    neighboured = [item for item in excerpts if item.context_before or item.context_after]
+
+    assert neighboured, f"{document.relative_path}에서 이웃 조각이 하나도 오지 않았다"
+    for excerpt in neighboured:
+        for neighbor in (*excerpt.context_before, *excerpt.context_after):
+            assert abs(neighbor.position - excerpt.position) == 1
+            assert neighbor.text in document.body
+        assert [item.position for item in excerpt.context_before] < [excerpt.position]
+        assert [item.position for item in excerpt.context_after] > [excerpt.position]
+
+
+def _vault_wiki_or_skip() -> Path:
+    from woon_core.knowledge.factory import resolve_knowledge_vault
+
+    try:
+        wiki = resolve_knowledge_vault() / "wiki"
+    except Exception:  # noqa: BLE001 - no registered vault is a skip, not a failure
+        pytest.skip("a registered knowledge vault is required for the real-page gate")
+    if not wiki.is_dir():
+        pytest.skip("a registered knowledge vault is required for the real-page gate")
+    return wiki
+
+
 def test_duplicate_queries_are_rejected(tmp_path: Path) -> None:
     path = tmp_path / "duplicated.yaml"
     path.write_text(
         "version: 1\nqueries:\n"
-        "  - query: 같은 질의\n    expected: a.md\n"
-        "  - query: 같은 질의\n    expected: b.md\n",
+        "  - query: 같은 질의\n    expected: a.md\n    evidence: 어느 절\n"
+        "  - query: 같은 질의\n    expected: b.md\n    evidence: 어느 절\n",
         encoding="utf-8",
     )
     with pytest.raises(WoonError, match="duplicated"):
@@ -104,6 +155,8 @@ def test_recorded_result_keeps_no_machine_path(tmp_path: Path, wiki: Path) -> No
 def _queries(tmp_path: Path, query: str, expected: str) -> Path:
     path = tmp_path / "queries.yaml"
     path.write_text(
-        f"version: 1\nqueries:\n  - query: {query}\n    expected: {expected}\n", encoding="utf-8"
+        f"version: 1\nqueries:\n  - query: {query}\n    expected: {expected}\n"
+        f"    evidence: 픽스처 본문 한 줄\n",
+        encoding="utf-8",
     )
     return path
