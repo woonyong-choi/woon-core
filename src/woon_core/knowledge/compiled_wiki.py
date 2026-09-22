@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -138,11 +139,32 @@ class CompiledWikiSettings:
 
 @dataclass(frozen=True, slots=True)
 class CompileReport:
-    """Observable result of one deterministic compiler invocation."""
+    """Observable result of one deterministic compiler invocation.
+
+    ``pages`` counts every page spec the run considered (``compiled + unchanged``)
+    and ``elapsed_ms`` measures the whole invocation. Both are reported, never
+    written into a receipt, so the compiler stays deterministic on its inputs.
+    """
 
     compiled: int
     unchanged: int
     page_ids: tuple[str, ...]
+    pages: int = 0
+    elapsed_ms: int = 0
+
+
+def _compile_report(
+    compiled: int, unchanged: int, changed_ids: list[str], started: float
+) -> CompileReport:
+    """Close one compiler run with its page count and wall-clock cost."""
+
+    return CompileReport(
+        compiled=compiled,
+        unchanged=unchanged,
+        page_ids=tuple(changed_ids),
+        pages=compiled + unchanged,
+        elapsed_ms=round((time.monotonic() - started) * 1000),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,6 +649,7 @@ class CompiledWiki:
     def compile(self, *, force: bool = False, page_ids: tuple[str, ...] = ()) -> CompileReport:
         """Compile stale or requested pages only after validating every input relation."""
 
+        started = time.monotonic()
         sources, claims, pages, curations, receipts = self._load_inputs()
         retirement_receipts = self._load_retirement_receipts()
         retirement_receipts_anchor = self._load_retirement_receipts_anchor()
@@ -716,7 +739,7 @@ class CompiledWiki:
             relation_changed = True
         if not writes and not relation_changed and not receipt_changed:
             self._last_input_state = None
-            return CompileReport(compiled, unchanged, tuple(changed_ids))
+            return _compile_report(compiled, unchanged, changed_ids, started)
 
         snapshots = [(path, path.read_bytes() if path.is_file() else None) for path, _ in writes]
         receipt_snapshot = (
@@ -758,7 +781,7 @@ class CompiledWiki:
                 atomic_write(self._settings.relations_path, relation_snapshot)
             raise
         self._last_input_state = None
-        return CompileReport(compiled, unchanged, tuple(changed_ids))
+        return _compile_report(compiled, unchanged, changed_ids, started)
 
     def owns_page(self, page_id: str, *, output_path: str | None = None) -> bool:
         """Check declared identity/output ownership without loading unrelated source prose."""
