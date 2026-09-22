@@ -34,14 +34,21 @@ AI 도구가 늘어나면서 같은 규칙이 Codex `AGENTS.md`, Claude `CLAUDE.
 
 | 항목 | 값 | 재현 |
 | --- | --- | --- |
-| 테스트 | 1,630개 중 1,624개 통과 | `uv run pytest -q` |
-| 구현 / 테스트 코드 | 131 파일 77,119줄 / 93 파일 49,159줄 | `git ls-files 'src/**/*.py' \| xargs wc -l` |
+| 테스트 | 1,660개 중 1,659개 통과, 1개 skip, 실패 0 | `uv run pytest -q` |
+| 구현 / 테스트 코드 | 132 파일 78,123줄 / 94 파일 49,891줄 | `git ls-files 'src/**/*.py' \| xargs wc -l` |
 | 관리 저장소 | 12개 | [`registry/repositories.yaml`](registry/repositories.yaml) |
 | 스킬 카탈로그 | 86개, metadata·link·catalog drift 검사 통과 | `python scripts/audit_skills.py` (woon-skills) |
 | 공개 위키 투영 | 240쪽 (본문 완료 195쪽) | `woon knowledge public-projection` |
+| 검색 벤치 | 질의 20건에서 P@1 1.00, 평균 6.2 ms, 읽는 문맥 3,636자 → 373자(절) | `woon knowledge bench` |
 | 비밀값 스캔 | 전체 이력에서 0건 | `gitleaks detect --source . --log-opts="--all"` |
 
-남은 6개 실패는 코드 결함이 아니라 `pdftoppm`(poppler) 미설치 환경에서 스캔 crop 검증 테스트가 전제 조건을 만족하지 못해 발생한다. `brew install poppler` 후 다시 실행하면 사라진다.
+스캔 crop 검증 테스트는 `pdftoppm`(poppler)을 요구한다. CI는 Linux·macOS 양쪽에서 poppler를 먼저 설치하므로 실패가 남지 않고, 로컬도 `brew install poppler` 후 전체 통과한다. 남은 1개 skip은 `WOON_DOCLING_MODEL_CACHE`가 있어야 도는 Docling PDF/OCR 통합 테스트다.
+
+## 설계
+
+원자료가 Wiki 페이지가 되고 다시 검색·Obsidian·공개 투영 세 갈래로 나가기까지의 단계와,
+컴파일러의 다섯 게이트가 각각 무엇을 거부하는지는 [docs/architecture.md](docs/architecture.md)에
+Mermaid 다이어그램과 표로 정리했다.
 
 ## 실행 방법
 
@@ -149,7 +156,7 @@ Codex 작업 삭제는 `python -m woon_core.environment.codex_thread_review plan
 [![CI](https://github.com/woonyong-choi/woon-core/actions/workflows/ci.yml/badge.svg)](https://github.com/woonyong-choi/woon-core/actions/workflows/ci.yml)
 
 ```bash
-uv run pytest -q          # 단위·계약 테스트 1,630개
+uv run pytest -q          # 단위·계약 테스트 1,660개
 uv run mypy src           # 정적 타입
 uv run ruff check src tests   # lint
 woon context check --all  # 생성된 지침의 drift 검사
