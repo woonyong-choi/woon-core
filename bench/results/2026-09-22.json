@@ -1,0 +1,196 @@
+{
+  "generated_at": "2026-09-22T19:54:56+00:00",
+  "wiki_root": "wiki",
+  "documents": 2619,
+  "chunks": 8678,
+  "queries": 20,
+  "limit": 5,
+  "precision_at_1": 1.0,
+  "precision_at_5": 1.0,
+  "mean_elapsed_ms": 8.659,
+  "mean_document_chars": 3635.55,
+  "mean_section_chars": 373.0,
+  "mean_section_window_chars": 848.15,
+  "results": [
+    {
+      "query": "동전을 세 번 던져 모두 앞면일 때 사전분포로 극단적인 추정을 완화하는 방법",
+      "expected": "ai/map-estimation.md",
+      "hit_rank": 1,
+      "elapsed_ms": 10.084,
+      "document_chars": 4843,
+      "section_chars": 269,
+      "section_window_chars": 544
+    },
+    {
+      "query": "여러 Query head를 그룹으로 묶어 하나의 K/V head를 공유하면 decode 메모리가 어떻게 되나",
+      "expected": "ai/grouped-query-attention.md",
+      "hit_rank": 1,
+      "elapsed_ms": 12.592,
+      "document_chars": 3052,
+      "section_chars": 593,
+      "section_window_chars": 1389
+    },
+    {
+      "query": "별도 draft 모델 없이 몇 스텝 뒤의 토큰 후보를 예측하는 보조 head를 붙이는 방법",
+      "expected": "ai/medusa-heads.md",
+      "hit_rank": 1,
+      "elapsed_ms": 11.787,
+      "document_chars": 1987,
+      "section_chars": 343,
+      "section_window_chars": 968
+    },
+    {
+      "query": "커널 원소 사이에 빈칸을 두어 파라미터를 늘리지 않고 넓은 문맥을 보는 합성곱",
+      "expected": "ai/dilated-convolution.md",
+      "hit_rank": 1,
+      "elapsed_ms": 7.727,
+      "document_chars": 1207,
+      "section_chars": 258,
+      "section_window_chars": 646
+    },
+    {
+      "query": "depth와 width와 resolution을 균형 있게 조절하는 compound scaling",
+      "expected": "ai/efficientnet-scaling.md",
+      "hit_rank": 1,
+      "elapsed_ms": 4.162,
+      "document_chars": 1210,
+      "section_chars": 396,
+      "section_window_chars": 671
+    },
+    {
+      "query": "스마트폰과 임베디드에서 정확도를 조금 양보하고 계산량과 파라미터를 줄이는 CNN",
+      "expected": "ai/mobilenet-lightweight.md",
+      "hit_rank": 1,
+      "elapsed_ms": 5.233,
+      "document_chars": 1114,
+      "section_chars": 183,
+      "section_window_chars": 596
+    },
+    {
+      "query": "손글씨 숫자 분류와 대규모 RGB 이미지 분류 모델의 공통 골격과 차이",
+      "expected": "ai/lenet-alexnet.md",
+      "hit_rank": 1,
+      "elapsed_ms": 7.178,
+      "document_chars": 7782,
+      "section_chars": 433,
+      "section_window_chars": 904
+    },
+    {
+      "query": "토큰마다 일부 전문가만 활성화해 추론 비용을 낮춘 sparse MoE 오픈 가중치 모델",
+      "expected": "ai/mistral-mixtral.md",
+      "hit_rank": 1,
+      "elapsed_ms": 1.739,
+      "document_chars": 3014,
+      "section_chars": 354,
+      "section_window_chars": 1027
+    },
+    {
+      "query": "행렬을 곱해도 방향이 유지되고 크기만 달라지는 벡터를 찾는 이유",
+      "expected": "ai/eigenvalue-eigenvector.md",
+      "hit_rank": 1,
+      "elapsed_ms": 7.321,
+      "document_chars": 4259,
+      "section_chars": 592,
+      "section_window_chars": 791
+    },
+    {
+      "query": "모델이 실패할 입력을 의도적으로 던져 위험 답변과 정책 우회를 찾는 안전성 평가",
+      "expected": "ai/red-teaming.md",
+      "hit_rank": 1,
+      "elapsed_ms": 8.61,
+      "document_chars": 5416,
+      "section_chars": 104,
+      "section_window_chars": 431
+    },
+    {
+      "query": "외부 시스템 기능을 Tool과 Resource와 Prompt로 감싸 Host가 발견하고 호출하게 만들기",
+      "expected": "ai/mcp-server-implementation.md",
+      "hit_rank": 1,
+      "elapsed_ms": 8.886,
+      "document_chars": 2044,
+      "section_chars": 554,
+      "section_window_chars": 1113
+    },
+    {
+      "query": "먼저 끝난 요청의 자리를 다음 요청으로 채울지 정하는 batch 교체 시점",
+      "expected": "ai/static-dynamic-batching.md",
+      "hit_rank": 1,
+      "elapsed_ms": 9.065,
+      "document_chars": 2004,
+      "section_chars": 157,
+      "section_window_chars": 479
+    },
+    {
+      "query": "요청 수만 보고 스케일하면 빗나가는 LLM 서빙 인스턴스 조절과 요청 분배",
+      "expected": "ai/autoscaling-load-balancing.md",
+      "hit_rank": 1,
+      "elapsed_ms": 7.459,
+      "document_chars": 2284,
+      "section_chars": 383,
+      "section_window_chars": 1327
+    },
+    {
+      "query": "필요한 문서를 찾았는지와 그 문서에 근거해 답했는지를 나눠 보는 기준",
+      "expected": "ai/rag-evaluation-metrics.md",
+      "hit_rank": 1,
+      "elapsed_ms": 1.987,
+      "document_chars": 1927,
+      "section_chars": 207,
+      "section_window_chars": 466
+    },
+    {
+      "query": "사실과 규칙을 기호로 표현해 왜 이 결론이 나왔는지 경로로 설명하는 접근",
+      "expected": "ai/symbolic-ai-reasoning.md",
+      "hit_rank": 1,
+      "elapsed_ms": 15.952,
+      "document_chars": 2162,
+      "section_chars": 181,
+      "section_window_chars": 464
+    },
+    {
+      "query": "BIO 표기로 원문 span과 model token 경계를 일치시키는 방법",
+      "expected": "ai/named-entity-recognition.md",
+      "hit_rank": 1,
+      "elapsed_ms": 9.368,
+      "document_chars": 1377,
+      "section_chars": 211,
+      "section_window_chars": 523
+    },
+    {
+      "query": "천 건의 고품질 지시 답변 쌍이 오만 건의 저품질 데이터보다 나은 이유",
+      "expected": "ai/sft-data-quality.md",
+      "hit_rank": 1,
+      "elapsed_ms": 7.682,
+      "document_chars": 10120,
+      "section_chars": 720,
+      "section_window_chars": 1772
+    },
+    {
+      "query": "루트 계정을 공유하지 않고 개발자와 배포 스크립트마다 권한을 구분하기",
+      "expected": "security/aws-iam.md",
+      "hit_rank": 1,
+      "elapsed_ms": 6.972,
+      "document_chars": 5647,
+      "section_chars": 898,
+      "section_window_chars": 1234
+    },
+    {
+      "query": "배열 정렬이나 픽셀 계산이 메인 스레드를 점유해 클릭과 스크롤이 멈출 때",
+      "expected": "backend/web-workers.md",
+      "hit_rank": 1,
+      "elapsed_ms": 12.251,
+      "document_chars": 4474,
+      "section_chars": 335,
+      "section_window_chars": 767
+    },
+    {
+      "query": "매 스텝의 최선이 전체 문장의 최선으로 이어지지 않을 때 후보를 여러 개 유지하기",
+      "expected": "ai/beam-search-decoding.md",
+      "hit_rank": 1,
+      "elapsed_ms": 17.124,
+      "document_chars": 6788,
+      "section_chars": 289,
+      "section_window_chars": 851
+    }
+  ]
+}

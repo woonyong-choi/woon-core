@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
@@ -777,6 +778,9 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         "compile-audit",
     }:
         _run_compiled_knowledge(command, raw_options, output)
+        return
+    if command == "bench":
+        _run_knowledge_search_bench(raw_options, output)
         return
     if command == "evaluate":
         _run_knowledge_evaluation(raw_options, output)
@@ -3217,6 +3221,76 @@ def _run_compiled_knowledge(command: str, arguments: list[str], output: TextIO) 
     print(json.dumps(asdict(audit), ensure_ascii=False, indent=2), file=output)
     if not audit.complete:
         raise WoonError(f"compiled Wiki audit found {len(audit.errors)} errors")
+
+
+KNOWLEDGE_BENCH_USAGE = """usage: woon knowledge bench [options]
+
+Measure retrieval quality and reading cost against a fixed query set.
+
+  --queries PATH      query set YAML (default: bench/knowledge-queries.yaml)
+  --wiki PATH         Wiki root to index (default: <knowledge vault>/wiki)
+  --results-dir PATH  where the run is recorded (default: bench/results)
+  --limit N           results considered per query (default: 5)
+  --no-write          print the table without recording a result file
+"""
+
+
+def _run_knowledge_search_bench(arguments: list[str], output: TextIO) -> None:
+    """Run ``woon knowledge bench`` and record one JSON result per run."""
+
+    from woon_core.knowledge.search_bench import (
+        DEFAULT_LIMIT,
+        format_bench_table,
+        load_bench_queries,
+        run_search_bench,
+        write_bench_result,
+    )
+
+    if arguments in (["--help"], ["-h"]):
+        output.write(KNOWLEDGE_BENCH_USAGE)
+        return
+    write_result = True
+    remaining: list[str] = []
+    for value in arguments:
+        if value == "--no-write":
+            write_result = False
+        else:
+            remaining.append(value)
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(remaining):
+        option = remaining[index]
+        if option not in {"--queries", "--wiki", "--results-dir", "--limit"}:
+            raise WoonError(f"unexpected knowledge bench argument: {option}")
+        if index + 1 >= len(remaining) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = remaining[index + 1]
+        index += 2
+
+    queries_path = Path(values.get("--queries", "bench/knowledge-queries.yaml")).expanduser()
+    results_dir = Path(values.get("--results-dir", "bench/results")).expanduser()
+    wiki_root = (
+        Path(values["--wiki"]).expanduser().resolve()
+        if "--wiki" in values
+        else resolve_knowledge_vault() / "wiki"
+    )
+    try:
+        limit = int(values.get("--limit", DEFAULT_LIMIT))
+    except ValueError as error:
+        raise WoonError("knowledge bench --limit requires an integer") from error
+    if limit < 1:
+        raise WoonError("knowledge bench --limit must be at least 1")
+
+    with tempfile.TemporaryDirectory(prefix="woon-bench-") as scratch:
+        report = run_search_bench(
+            wiki_root,
+            load_bench_queries(queries_path),
+            Path(scratch) / "bench.sqlite3",
+            limit=limit,
+        )
+    print(format_bench_table(report), file=output)
+    if write_result:
+        print(f"\nrecorded: {write_bench_result(report, results_dir)}", file=output)
 
 
 def _run_research_intake_plan(arguments: list[str], output: TextIO) -> None:
