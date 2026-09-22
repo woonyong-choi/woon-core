@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 import subprocess
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import date
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from woon_core.knowledge.adapters import (
     MarkdownKnowledgeCorpus,
     SQLiteFtsSearchIndex,
 )
+from woon_core.knowledge.adapters.sqlite_search import _chunk_document, _split_section
 from woon_core.knowledge.config import KnowledgeSettings
 from woon_core.knowledge.domain import CanonicalDocument, DocumentMetadata, IndexedDocument
 from woon_core.knowledge.factory import build_knowledge_service
@@ -938,3 +940,140 @@ def test_repository_indexes_canonical_paths_once_during_exclusive_batch(
 
     assert repository.get("concepts/topic-1") is not None
     assert repository.parse_calls > indexed_calls
+
+
+def _indexed(document_id: str, body: str) -> IndexedDocument:
+    return IndexedDocument(
+        document_id=document_id,
+        canonical_id=None,
+        title=document_id,
+        summary="",
+        body=body,
+        relative_path=document_id,
+        revision="0" * 64,
+        source_type="wiki",
+    )
+
+
+def test_sqlite_index_stores_increasing_position_per_document(tmp_path: Path) -> None:
+    index = SQLiteFtsSearchIndex(tmp_path / "search.sqlite3")
+    body = "# 문서\n\n## 하나\n\n첫 절.\n\n## 둘\n\n둘째 절.\n\n## 셋\n\n셋째 절.\n"
+    index.rebuild([_indexed("b.md", body), _indexed("a.md", body)])
+
+    with sqlite3.connect(tmp_path / "search.sqlite3") as connection:
+        rows = connection.execute(
+            "SELECT document_id, position, heading FROM knowledge_chunks ORDER BY rowid"
+        ).fetchall()
+
+    assert rows == [
+        ("a.md", 0, "하나"),
+        ("a.md", 1, "둘"),
+        ("a.md", 2, "셋"),
+        ("b.md", 0, "하나"),
+        ("b.md", 1, "둘"),
+        ("b.md", 2, "셋"),
+    ]
+    assert index.generation() is not None
+
+
+def test_sqlite_index_from_older_schema_reports_no_generation(tmp_path: Path) -> None:
+    database = tmp_path / "search.sqlite3"
+    index = SQLiteFtsSearchIndex(database)
+    index.rebuild([_indexed("a.md", "# 문서\n\n본문.\n")])
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM knowledge_metadata WHERE key = 'schema'")
+        connection.commit()
+
+    assert index.generation() is None
+
+
+def test_read_excerpt_returns_ordered_neighbors_and_clamps_at_edges(tmp_path: Path) -> None:
+    index = SQLiteFtsSearchIndex(tmp_path / "search.sqlite3")
+    body = "\n".join(f"## 절 {number}\n\n{number}번째 본문.\n" for number in range(6))
+    index.rebuild([_indexed("a.md", body), _indexed("other.md", body)])
+    hit = index.search("3번째", 1)[0]
+    assert hit.document_id == "a.md"
+
+    plain = index.read_excerpt(hit.document_id, hit.chunk_id)
+    assert plain.position == 3
+    assert plain.context_before == ()
+    assert plain.context_after == ()
+
+    excerpt = index.read_excerpt(hit.document_id, hit.chunk_id, before=2, after=1)
+    assert [item.position for item in excerpt.context_before] == [1, 2]
+    assert [item.heading for item in excerpt.context_before] == ["절 1", "절 2"]
+    assert [item.position for item in excerpt.context_after] == [4]
+    assert excerpt.context_after[0].text == "## 절 4\n\n4번째 본문."
+    assert all(item.chunk_id != excerpt.chunk_id for item in excerpt.context_before)
+
+    edge = index.read_excerpt(hit.document_id, hit.chunk_id, before=10, after=-4)
+    assert [item.position for item in edge.context_before] == [0, 1, 2]
+    assert edge.context_after == ()
+
+    first = index.read_excerpt(hit.document_id, index.search("0번째", 1)[0].chunk_id, before=3)
+    assert first.position == 0
+    assert first.context_before == ()
+
+
+def test_service_read_excerpt_marks_neighbors_with_freshness(tmp_path: Path) -> None:
+    canonical_root = tmp_path / "wiki/canonical"
+    canonical_root.mkdir(parents=True)
+    source = tmp_path / "wiki/os/paging.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("# 페이징\n\n## 앞\n\n앞 절.\n\n## 뒤\n\n뒤 절 토큰.\n", encoding="utf-8")
+    service = KnowledgeService(
+        MarkdownDocumentRepository(tmp_path, canonical_root),
+        SQLiteFtsSearchIndex(tmp_path / ".local/search.sqlite3"),
+        GitKnowledgeHistory(tmp_path),
+        MarkdownKnowledgeCorpus(tmp_path, (CorpusRoot(tmp_path / "wiki", "wiki"),), ()),
+    )
+    service.reindex()
+    hit = service.search("뒤 절 토큰", 1)[0]
+
+    excerpt = service.read_excerpt(hit.document_id, hit.chunk_id, before=1, after=1)
+
+    assert excerpt.position == 1
+    assert [item.text for item in excerpt.context_before] == ["## 앞\n\n앞 절."]
+    assert excerpt.context_after == ()
+    assert asdict(excerpt)["context_before"][0]["heading"] == "앞"
+
+
+def test_paragraph_split_overlaps_one_paragraph_but_heading_split_does_not() -> None:
+    paragraphs = [f"문단 {number} " + "x" * 40 for number in range(6)]
+    section = "## 긴 절\n\n" + "\n\n".join(paragraphs)
+    chunks = _split_section(section, max_chars=120)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 120 for chunk in chunks)
+    for previous, following in zip(chunks, chunks[1:], strict=False):
+        assert following.startswith(previous.split("\n\n")[-1])
+    assert "".join(paragraphs[-1]) in chunks[-1]
+
+    document = _indexed("a.md", "# 제목\n\n## 하나\n\n첫 절.\n\n## 둘\n\n둘째 절.\n")
+    heading_chunks = _chunk_document(document, 6000)
+    assert [chunk.text for chunk in heading_chunks] == ["## 하나\n\n첫 절.", "## 둘\n\n둘째 절."]
+    assert [chunk.position for chunk in heading_chunks] == [0, 1]
+
+
+def test_paragraph_split_skips_overlap_for_large_paragraph_and_hard_splits() -> None:
+    large = "y" * 70
+    section = "\n\n".join(["a" * 30, large, "b" * 30, "c" * 30, "d" * 30])
+    chunks = _split_section(section, max_chars=120)
+
+    assert chunks[0] == "a" * 30 + "\n\n" + large
+    assert chunks[1].startswith("b" * 30)
+    assert large not in chunks[1]
+
+    hard = "\n\n".join(["p" * 20, "z" * 250, "q" * 20])
+    hard_chunks = _split_section(hard, max_chars=100)
+    assert hard_chunks == ["p" * 20, "z" * 100, "z" * 100, "z" * 50, "q" * 20]
+
+
+def test_chunk_ids_are_deterministic_across_rebuilds(tmp_path: Path) -> None:
+    body = "## 절\n\n" + "\n\n".join("문단 " + str(n) + " " + "x" * 300 for n in range(20))
+    first = _chunk_document(_indexed("a.md", body), 1000)
+    second = _chunk_document(_indexed("a.md", body), 1000)
+
+    assert len(first) > 2
+    assert [c.identifier for c in first] == [c.identifier for c in second]
+    assert len({c.identifier for c in first}) == len(first)

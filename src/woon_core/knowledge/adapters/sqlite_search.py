@@ -1,4 +1,11 @@
-"""On-demand section-aware SQLite FTS5 knowledge search."""
+"""On-demand section-aware SQLite FTS5 knowledge search.
+
+Chunking rule: a document is split at Markdown headings with no overlap; only when
+one section still exceeds ``max_chunk_chars`` and is split at paragraph boundaries
+does the next chunk start with the previous chunk's last paragraph (one-paragraph
+overlap, skipped when that paragraph exceeds half of ``max_chunk_chars`` or would
+not fit), and hard character splits of an oversized paragraph get no overlap.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +19,7 @@ from typing import Any
 
 from woon_core.errors import WoonError
 from woon_core.knowledge.domain import (
+    ExcerptNeighbor,
     IndexedDocument,
     IndexStatistics,
     KnowledgeExcerpt,
@@ -19,6 +27,8 @@ from woon_core.knowledge.domain import (
 )
 from woon_core.knowledge.generation import knowledge_generation
 
+SCHEMA_VERSION = "2"
+MAX_NEIGHBORS = 3
 MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 QUERY_STOPWORDS = {
     "관계",
@@ -37,6 +47,7 @@ class _Chunk:
     identifier: str
     heading: str
     text: str
+    position: int
 
 
 class SQLiteFtsSearchIndex:
@@ -66,6 +77,7 @@ class SQLiteFtsSearchIndex:
                         document.revision,
                         document.source_type,
                         chunk.identifier,
+                        chunk.position,
                     )
                 )
         with sqlite3.connect(self._database) as connection:
@@ -77,14 +89,18 @@ class SQLiteFtsSearchIndex:
                 """
                 INSERT INTO knowledge_chunks
                   (document_id, canonical_id, title, summary, heading, body,
-                   relative_path, revision, source_type, chunk_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   relative_path, revision, source_type, chunk_id, position)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
             connection.execute(
                 "INSERT OR REPLACE INTO knowledge_metadata(key, value) VALUES ('generation', ?)",
                 (knowledge_generation(materialized),),
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO knowledge_metadata(key, value) VALUES ('schema', ?)",
+                (SCHEMA_VERSION,),
             )
             connection.commit()
         return document_count
@@ -94,6 +110,13 @@ class SQLiteFtsSearchIndex:
             return None
         with sqlite3.connect(self._database) as connection:
             _initialize(connection)
+            schema = connection.execute(
+                "SELECT value FROM knowledge_metadata WHERE key = 'schema'"
+            ).fetchone()
+            if schema is None or str(schema[0]) != SCHEMA_VERSION:
+                # An index built by an older layout (for example without the
+                # position column) reports no generation so the service rebuilds it.
+                return None
             row = connection.execute(
                 "SELECT value FROM knowledge_metadata WHERE key = 'generation'"
             ).fetchone()
@@ -136,22 +159,48 @@ class SQLiteFtsSearchIndex:
                 break
         return results
 
-    def read_excerpt(self, document_id: str, chunk_id: str) -> KnowledgeExcerpt:
+    def read_excerpt(
+        self, document_id: str, chunk_id: str, before: int = 0, after: int = 0
+    ) -> KnowledgeExcerpt:
         if not self._database.is_file():
             raise WoonError("knowledge index does not exist; run `woon knowledge index` first")
+        before = max(0, min(int(before), MAX_NEIGHBORS))
+        after = max(0, min(int(after), MAX_NEIGHBORS))
         with sqlite3.connect(self._database) as connection:
             _initialize(connection)
             row = connection.execute(
                 """
-                SELECT document_id, relative_path, revision, source_type, chunk_id, heading, body
+                SELECT document_id, relative_path, revision, source_type, chunk_id, heading,
+                       body, position
                   FROM knowledge_chunks
                  WHERE document_id = ? AND chunk_id = ?
                  LIMIT 1
                 """,
                 (document_id, chunk_id),
             ).fetchone()
-        if row is None:
-            raise WoonError("knowledge excerpt not found; rebuild the index and search again")
+            if row is None:
+                raise WoonError("knowledge excerpt not found; rebuild the index and search again")
+            position = int(row[7])
+            neighbors: list[tuple[Any, ...]] = []
+            if before or after:
+                neighbors = connection.execute(
+                    """
+                    SELECT chunk_id, heading, body, position
+                      FROM knowledge_chunks
+                     WHERE document_id = ? AND position BETWEEN ? AND ? AND position != ?
+                     ORDER BY position
+                    """,
+                    (document_id, position - before, position + after, position),
+                ).fetchall()
+        context = [
+            ExcerptNeighbor(
+                chunk_id=str(item[0]),
+                heading=str(item[1]),
+                text=str(item[2]),
+                position=int(item[3]),
+            )
+            for item in neighbors
+        ]
         return KnowledgeExcerpt(
             document_id=str(row[0]),
             relative_path=str(row[1]),
@@ -160,6 +209,9 @@ class SQLiteFtsSearchIndex:
             chunk_id=str(row[4]),
             heading=str(row[5]),
             text=str(row[6]),
+            position=position,
+            context_before=tuple(item for item in context if item.position < position),
+            context_after=tuple(item for item in context if item.position > position),
         )
 
     def statistics(self) -> IndexStatistics:
@@ -206,6 +258,7 @@ def _initialize(connection: sqlite3.Connection) -> None:
               revision UNINDEXED,
               source_type UNINDEXED,
               chunk_id UNINDEXED,
+              position UNINDEXED,
               tokenize='unicode61'
             )
             """
@@ -272,7 +325,7 @@ def _chunk_document(document: IndexedDocument, max_chars: int) -> list[_Chunk]:
             identifier = hashlib.sha256(
                 f"{document.document_id}\0{position}\0{text}".encode()
             ).hexdigest()[:20]
-            chunks.append(_Chunk(identifier, section_heading, text))
+            chunks.append(_Chunk(identifier, section_heading, text, position))
             position += 1
     return chunks
 
@@ -284,25 +337,33 @@ def _has_content(lines: list[str]) -> bool:
 def _split_section(section: str, max_chars: int) -> list[str]:
     if len(section) <= max_chars:
         return [section]
-    paragraphs = re.split(r"\n\s*\n", section)
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", section)]
+    paragraphs = [part for part in paragraphs if part]
     chunks: list[str] = []
-    current = ""
+    current: list[str] = []
     for paragraph in paragraphs:
         if len(paragraph) > max_chars:
             if current:
-                chunks.append(current)
-                current = ""
+                chunks.append("\n\n".join(current))
+                current = []
             chunks.extend(
                 paragraph[start : start + max_chars]
                 for start in range(0, len(paragraph), max_chars)
             )
             continue
-        candidate = f"{current}\n\n{paragraph}".strip()
-        if current and len(candidate) > max_chars:
-            chunks.append(current)
-            current = paragraph
+        if current and len("\n\n".join([*current, paragraph])) > max_chars:
+            chunks.append("\n\n".join(current))
+            current = [*_overlap(current[-1], paragraph, max_chars), paragraph]
         else:
-            current = candidate
+            current.append(paragraph)
     if current:
-        chunks.append(current)
+        chunks.append("\n\n".join(current))
     return chunks
+
+
+def _overlap(previous: str, paragraph: str, max_chars: int) -> tuple[str, ...]:
+    """Carry the previous chunk's last paragraph forward when it stays small."""
+
+    if len(previous) > max_chars // 2 or len(previous) + 2 + len(paragraph) > max_chars:
+        return ()
+    return (previous,)

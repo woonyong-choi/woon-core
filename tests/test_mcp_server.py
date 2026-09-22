@@ -148,6 +148,25 @@ def test_mcp_server_stdio_archives_searches_and_reads_a_section(tmp_path: Path) 
             )
             assert excerpt.structuredContent is not None
             assert "MCP stdio 검증 토큰" in excerpt.structuredContent["text"]
+            assert excerpt.structuredContent["context_before"] == []
+            assert excerpt.structuredContent["context_after"] == []
+
+            with_context = await session.call_tool(
+                "woon_knowledge_read_excerpt",
+                {
+                    "document_id": hit["document_id"],
+                    "chunk_id": hit["chunk_id"],
+                    "before": 1,
+                    "after": 2,
+                },
+            )
+            assert with_context.structuredContent is not None
+            assert with_context.structuredContent["position"] == 0
+            assert with_context.structuredContent["context_before"] == []
+            following = with_context.structuredContent["context_after"]
+            assert [item["heading"] for item in following] == ["학습 체크포인트"]
+            assert following[0]["position"] == 1
+            assert "woon-learning-checkpoint" in following[0]["text"]
 
     anyio.run(exercise)
 

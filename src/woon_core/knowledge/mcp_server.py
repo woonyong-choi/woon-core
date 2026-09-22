@@ -127,11 +127,18 @@ def get_knowledge(canonical_id: str) -> dict[str, object]:
         openWorldHint=False,
     ),
 )
-def read_knowledge_excerpt(document_id: str, chunk_id: str) -> dict[str, object]:
-    """Read only the matched Markdown section instead of loading an entire source document."""
+def read_knowledge_excerpt(
+    document_id: str, chunk_id: str, before: int = 0, after: int = 0
+) -> dict[str, object]:
+    """Read only the matched Markdown section instead of loading an entire source document.
+
+    ``before`` and ``after`` (0-3 each) add that many adjacent chunks of the same
+    document as ``context_before`` / ``context_after``, ordered by position, so a
+    section split across chunks can be read without loading the whole document.
+    """
 
     service = _service()
-    return asdict(service.read_excerpt(document_id, chunk_id))
+    return asdict(service.read_excerpt(document_id, chunk_id, before=before, after=after))
 
 
 @mcp.tool(

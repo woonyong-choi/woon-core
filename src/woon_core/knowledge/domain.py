@@ -68,6 +68,16 @@ class SearchResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ExcerptNeighbor:
+    """Adjacent chunk of the same document, returned around a selected excerpt."""
+
+    chunk_id: str
+    heading: str
+    text: str
+    position: int
+
+
+@dataclass(frozen=True, slots=True)
 class KnowledgeExcerpt:
     """Bounded section returned after a search hit is selected."""
 
@@ -80,6 +90,9 @@ class KnowledgeExcerpt:
     text: str
     freshness: str = "current"
     verification_state: str = "not-checked"
+    position: int = 0
+    context_before: tuple[ExcerptNeighbor, ...] = field(default_factory=tuple)
+    context_after: tuple[ExcerptNeighbor, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)

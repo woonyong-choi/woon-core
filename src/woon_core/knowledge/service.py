@@ -166,6 +166,9 @@ def _transaction_refreshes_tree(transaction: CompiledWikiTransaction) -> bool:
     )
 
 
+MAX_EXCERPT_NEIGHBORS = 3
+
+
 class KnowledgeService:
     """Coordinates ports while preserving one canonical file per concept."""
 
@@ -1685,16 +1688,24 @@ class KnowledgeService:
                 break
         return results
 
-    def read_excerpt(self, document_id: str, chunk_id: str) -> KnowledgeExcerpt:
+    def read_excerpt(
+        self, document_id: str, chunk_id: str, before: int = 0, after: int = 0
+    ) -> KnowledgeExcerpt:
         normalized_document_id = document_id.strip()
         normalized_chunk_id = chunk_id.strip()
         if not normalized_document_id or not normalized_chunk_id:
             raise WoonError("document_id and chunk_id must not be empty")
+        before = max(0, min(int(before), MAX_EXCERPT_NEIGHBORS))
+        after = max(0, min(int(after), MAX_EXCERPT_NEIGHBORS))
         if self._snapshot_vault is None:
             self._assert_index_current()
-            return self._index.read_excerpt(normalized_document_id, normalized_chunk_id)
+            return self._index.read_excerpt(
+                normalized_document_id, normalized_chunk_id, before=before, after=after
+            )
         self._require_index_snapshot()
-        excerpt = self._index.read_excerpt(normalized_document_id, normalized_chunk_id)
+        excerpt = self._index.read_excerpt(
+            normalized_document_id, normalized_chunk_id, before=before, after=after
+        )
         state = self._snapshot_state(excerpt.relative_path, excerpt.revision, None)
         if state is None:
             raise WoonError("excerpt is no longer within the configured readable scope")
