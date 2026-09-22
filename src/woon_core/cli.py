@@ -1887,6 +1887,17 @@ def _run_novel_wiki_projection(arguments: list[str], output: TextIO) -> None:
     )
 
 
+def _repin_refreshed_navigation_receipts(
+    vault: Path, changed_paths: tuple[Path, ...]
+) -> tuple[str, ...]:
+    """Re-pin compiled receipts for refreshed pages; report the unowned ones."""
+
+    if not changed_paths:
+        return ()
+    _, service = build_knowledge_service(vault)
+    return service.repin_wiki_navigation_receipts(changed_paths)
+
+
 def _run_wiki_tree_refresh(arguments: list[str], output: TextIO) -> None:
     """Refresh every generated navigation block after validating the whole tree."""
 
@@ -1912,7 +1923,16 @@ def _run_wiki_tree_refresh(arguments: list[str], output: TextIO) -> None:
     )
     if report.issues:
         raise WoonError("Wiki tree refresh rejected: " + "; ".join(report.issues[:12]))
+    changed_paths = tuple(
+        path
+        for path, content in sorted(report.pages.items(), key=lambda item: item[0].as_posix())
+        if path.read_bytes() != content
+    )
     apply_wiki_tree_refresh(vault, report)
+    # The refresh rewrites managed blocks inside compiler-owned pages, so their
+    # receipts have to be pinned again here; otherwise the next compile-audit
+    # reports every refreshed page as differing from its receipt.
+    unowned = _repin_refreshed_navigation_receipts(vault, changed_paths)
     print(
         json.dumps(
             {
@@ -1920,6 +1940,7 @@ def _run_wiki_tree_refresh(arguments: list[str], output: TextIO) -> None:
                 "document_count": report.document_count,
                 "changed_count": report.changed_count,
                 "canonical_prefix": values.get("--canonical-prefix"),
+                "unowned_paths": list(unowned),
             },
             ensure_ascii=False,
             indent=2,

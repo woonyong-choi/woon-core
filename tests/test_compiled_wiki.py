@@ -42,7 +42,11 @@ from woon_core.knowledge.compiled_wiki import (
 from woon_core.knowledge.domain import DocumentMetadata, IndexedDocument
 from woon_core.knowledge.learning_checkpoint import LearningCheckpoint
 from woon_core.knowledge.service import KnowledgeService
-from woon_core.knowledge.wiki_tree import split_markdown
+from woon_core.knowledge.wiki_tree import (
+    apply_wiki_tree_refresh,
+    prepare_wiki_tree_refresh,
+    split_markdown,
+)
 
 
 class FailOnceIndex(SQLiteFtsSearchIndex):
@@ -6022,3 +6026,61 @@ def test_compacted_generated_history_keeps_current_output(tmp_path: Path) -> Non
     with pytest.raises(WoonError, match="compact source"):
         compiler.compile()
     assert output.read_bytes() == before
+
+
+def test_navigation_refresh_receipts_are_repinned_for_owned_pages(tmp_path: Path) -> None:
+    """A standalone navigation refresh must leave the audit clean.
+
+    The refresh rewrites the children marker inside a compiler-owned page, so
+    its receipt ``output_sha256`` no longer matches the file on disk until it is
+    pinned again. Pages the compiler does not own have no receipt to pin.
+    """
+
+    vault = tmp_path
+    write_page(vault, "README.md", "Wiki", "<!-- fixture root -->")
+    write_page(vault, "hub.md", "면접", "<!-- fixture hub -->")
+    write_page(vault, "hub/principles.md", "면접 기준", "면접 답변을 병합한 정본이다.\n")
+    compiler = CompiledWiki(compiled_settings(vault))
+    compiler.migrate()
+
+    pages_path = vault / "catalog/llm-wiki/pages.yaml"
+    payload = yaml.safe_load(pages_path.read_text(encoding="utf-8"))
+    by_id = {page["page_id"]: page for page in payload["pages"]}
+    by_id["README"]["frontmatter"].update(
+        {"node_kind": "root", "view_mode": "tree", "keywords": ["Wiki"], "aliases": []}
+    )
+    by_id["hub"]["frontmatter"].update(
+        {
+            "node_kind": "hub",
+            "view_mode": "tree",
+            "parent": "[[wiki/README|Wiki]]",
+            "keywords": ["면접"],
+            "aliases": [],
+        }
+    )
+    by_id["hub/principles"]["frontmatter"].update(
+        {
+            "node_kind": "entity",
+            "entity_kind": "interview-principles",
+            "view_mode": "article",
+            "parent": "[[wiki/hub|면접]]",
+            "keywords": ["면접 기준"],
+            "aliases": [],
+        }
+    )
+    pages_path.write_text(yaml.safe_dump(payload, allow_unicode=True), encoding="utf-8")
+    compiler.compile(force=True)
+
+    report = prepare_wiki_tree_refresh(vault)
+    assert report.issues == ()
+    changed = tuple(path for path, content in report.pages.items() if path.read_bytes() != content)
+    apply_wiki_tree_refresh(vault, report)
+    hub_path = vault / "wiki/hub.md"
+    assert hub_path in changed
+    assert "[[wiki/hub/principles|면접 기준]]" in hub_path.read_text(encoding="utf-8")
+    assert any("differ from its receipt" in error for error in compiler.audit().errors)
+
+    unowned = compiler.repin_generated_view_receipts(changed)
+
+    assert unowned == ()
+    assert compiler.audit().errors == ()

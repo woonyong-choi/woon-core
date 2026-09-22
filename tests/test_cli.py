@@ -1901,7 +1901,7 @@ def test_knowledge_refresh_wiki_tree_validates_and_applies(
 ) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
-    report = SimpleNamespace(document_count=9, changed_count=2, issues=())
+    report = SimpleNamespace(document_count=9, changed_count=2, issues=(), pages={})
     calls: list[object] = []
     monkeypatch.setattr(
         cli,
@@ -1932,7 +1932,7 @@ def test_knowledge_refresh_wiki_tree_forwards_canonical_prefix(
 ) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
-    report = SimpleNamespace(document_count=9, changed_count=2, issues=())
+    report = SimpleNamespace(document_count=9, changed_count=2, issues=(), pages={})
     calls: list[object] = []
     monkeypatch.setattr(
         cli,

@@ -306,6 +306,23 @@ class KnowledgeService:
                 self._reindex_unlocked()
             return report
 
+    def repin_wiki_navigation_receipts(self, changed_paths: tuple[Path, ...]) -> tuple[str, ...]:
+        """Pin receipts for pages a standalone navigation refresh just rewrote.
+
+        A refresh rewrites managed marker blocks inside compiler-owned outputs,
+        which leaves their receipt ``output_sha256`` stale until it is pinned
+        again; without this step the next ``compile-audit`` reports every
+        refreshed page as differing from its receipt. Paths the compiler does
+        not own carry no receipt and are returned instead.
+        """
+
+        if self._compiled_wiki is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        with self._repository.exclusive():
+            unowned = self._compiled_wiki.repin_generated_view_receipts(changed_paths)
+            self._reindex_unlocked()
+            return unowned
+
     def migrate_compiled_wiki(self) -> MigrationReport:
         """Convert current Wiki pages once into source-schema compiler inputs."""
 

@@ -6427,6 +6427,30 @@ class CompiledWiki:
             )
         }
 
+    def repin_generated_view_receipts(self, paths: tuple[Path, ...]) -> tuple[str, ...]:
+        """Re-pin receipts for tree-refreshed outputs and report the ones not owned.
+
+        A standalone navigation refresh rewrites managed marker blocks inside
+        compiler-owned pages, which makes their receipt ``output_sha256`` stale
+        until it is pinned again. Human-authored pages have no receipt, so they
+        are returned instead of failing the caller.
+        """
+
+        _, _, pages, _, _ = self._load_inputs()
+        owned = {
+            _inside(self._settings.output_root, page["output_path"], "page output_path").resolve()
+            for page in pages.values()
+        }
+        resolved = tuple(path.resolve() for path in paths)
+        self._refresh_generated_view_receipts(tuple(p for p in resolved if p in owned))
+        return tuple(
+            sorted(
+                path.relative_to(self._settings.vault).as_posix()
+                for path in resolved
+                if path not in owned
+            )
+        )
+
     def _refresh_generated_view_receipts(self, paths: tuple[Path, ...]) -> None:
         """Pin tree-derived output bytes after proving compiler projection stability."""
 

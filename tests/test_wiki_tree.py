@@ -3963,3 +3963,71 @@ def test_planned_parent_link_uses_existing_parent_and_keeps_authored_text(tmp_pa
     assert PARENT_START not in render(rendered, current_texts=private_parent)
     private_child = original.replace("access: public", "access: local-only")
     assert PARENT_START not in render(private_child)
+
+
+def test_hub_children_block_lists_entity_children_beside_keyword_children(
+    tmp_path: Path,
+) -> None:
+    """A hub lists every direct child, whatever its node_kind.
+
+    An ``entity`` child is reachable only through this block: nothing else in a
+    generated page links to it, so dropping it from the list would leave the page
+    with zero rendered inbound links while the tree still calls it a child.
+    """
+
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/interview.md",
+        title="면접",
+        canonical_id="interview",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("면접",),
+        extra=(
+            "navigation_groups:\n"
+            "- label: 정본\n"
+            "  children:\n"
+            "  - interview/principles\n"
+            "- label: 주제\n"
+            "  children:\n"
+            "  - interview/topics\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/interview/principles.md",
+        title="면접 기준",
+        canonical_id="interview/principles",
+        node_kind="entity",
+        parent="[[wiki/interview|면접]]",
+        keywords=("면접 기준",),
+        view_mode="article",
+        body="면접 답변을 주제별로 병합한 단일 정본이다. 각 항목은 근거와 출처를 함께 둔다.",
+        extra="entity_kind: interview-principles\nlifecycle_status: active\n",
+    )
+    _write_page(
+        tmp_path,
+        "wiki/interview/topics.md",
+        title="면접 주제",
+        canonical_id="interview/topics",
+        node_kind="topic",
+        parent="[[wiki/interview|면접]]",
+        keywords=("면접 주제",),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+    assert report.issues == ()
+    rendered = report.pages[tmp_path / "wiki/interview.md"].decode("utf-8")
+    block = rendered.split(CHILDREN_START, maxsplit=1)[1].split(CHILDREN_END, maxsplit=1)[0]
+
+    assert "[[wiki/interview/principles|면접 기준]]" in block
+    assert "[[wiki/interview/topics|면접 주제]]" in block
