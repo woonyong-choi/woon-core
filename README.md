@@ -39,6 +39,7 @@ AI 도구가 늘어나면서 같은 규칙이 Codex `AGENTS.md`, Claude `CLAUDE.
 | 관리 저장소 | 12개 | [`registry/repositories.yaml`](registry/repositories.yaml) |
 | 스킬 카탈로그 | 86개, metadata·link·catalog drift 검사 통과 | `python scripts/audit_skills.py` (woon-skills) |
 | 공개 위키 투영 | 240쪽 (본문 완료 195쪽) | `woon knowledge public-projection` |
+| 컴파일 소요 | 2,415쪽 검증 18.7-23.2초 (3회 측정, 변경 0쪽 정상 상태) | `woon knowledge compile` |
 | 검색 벤치 | 질의 20건에서 P@1 1.00, 평균 6.2 ms, 읽는 문맥 3,636자 → 373자(절) | `woon knowledge bench` |
 | 비밀값 스캔 | 전체 이력에서 0건 | `gitleaks detect --source . --log-opts="--all"` |
 
