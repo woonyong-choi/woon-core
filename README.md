@@ -1,6 +1,6 @@
 # woon-core
 
-여러 저장소에 흩어진 AI 지침, 저장소 목록, IDE 설정, Markdown 지식 정본을 한 규칙으로 생성하고 검사하는 Python CLI입니다.
+여러 저장소에 흩어진 지침, 저장소 목록, IDE 설정, Markdown 지식 정본을 한 규칙으로 생성하고 검사하는 Python CLI입니다.
 
 - 규칙과 저장소 메타데이터는 정본에 한 번만 두고, `AGENTS.md`, `CLAUDE.md`, IDE 설정 같은 도구별 파일은 생성물로 다룹니다. 입력과 산출물이 다르면 `check` 명령이 실패합니다.
 - Wiki는 source, accepted claim, page spec을 분리해 컴파일하고 receipt를 남깁니다. 비공개 Vault는 그대로 두고 승인된 페이지만 공개 사이트에 투영합니다.
@@ -108,22 +108,13 @@ flowchart LR
 
 원자료가 Wiki 페이지가 되고 다시 검색·Obsidian·공개 투영 세 갈래로 나가기까지의 단계와, 컴파일러의 다섯 게이트(`schema`·`source-provenance`·`accepted-claims`·`frontmatter-h1`·`privacy`)가 각각 무엇을 거부하는지는 [docs/architecture.md](docs/architecture.md)에 정리했다. 공개 위키 사이트는 [docs.woonyong.com](https://docs.woonyong.com)이다.
 
-## 핵심 결정과 트레이드오프
+## 주요 규칙
 
-**1. 도구별 지침 파일을 전부 생성물로 취급한다.**
-같은 규칙을 Codex·Claude·Copilot 세 파일에 손으로 복사하면 어느 쪽이 최신인지 알 수 없다. 정본은 `standards/`·`policies/`에만 두고 세 파일은 `woon context generate`의 산출물로 만들었다. 버린 대안은 "한 파일을 정본으로 삼고 나머지를 symlink"였는데, 도구마다 요구하는 형식과 토큰 예산이 달라 같은 바이트를 공유할 수 없었다. 대가는 지침을 손으로 고치면 다음 generate에서 사라진다는 점이고, 그래서 `woon context check --all`이 drift를 exit 1로 만든다(`src/woon_core/context/`, `tests/test_context.py` 15건).
-
-**2. 저장소 간 참조를 `repo://` URI로 고정한다.**
-절대경로를 커밋하면 기기가 바뀔 때마다 깨진다. workspace root를 탐색한 뒤 registry의 저장소 ID로 해석하는 resolver를 뒀고, 충돌하는 root가 둘 이상이면 추측하지 않고 실패한다. 버린 대안은 환경변수 기반 경로였다 — 설정이 사람의 shell에 남아 재현되지 않는다. 대가는 resolver를 거치지 않는 외부 도구가 경로를 직접 못 읽는다는 점이다(`src/woon_core/workspace.py`, `registry/repositories.yaml`의 저장소 12개).
-
-**3. 지식 갱신을 MCP port 뒤에 두고 쓰기 전 revision을 검사한다.**
-에이전트가 vault 파일시스템을 직접 쓰면 두 에이전트가 같은 문서를 고칠 때 한쪽이 조용히 덮인다. document·search·history 세 port를 두고, 쓰기는 호출자가 읽은 revision과 현재 revision이 같을 때만 통과시킨다. 버린 대안은 파일 잠금인데, stdio MCP는 클라이언트가 붙어 있는 동안만 살아 있어 잠금 해제 시점을 보장할 수 없다. 대가는 호출자가 현재 revision을 먼저 읽어야 한다는 점이다(`src/woon_core/knowledge/`, `tests/test_knowledge.py` 42건 · `tests/test_mcp_server.py` 3건).
-
-**4. 컴파일은 결정적이고, 게이트가 통과 조건을 만든다.**
-LLM이 쓴 문장을 그대로 위키에 넣으면 어느 문장이 어디서 왔는지 되짚을 수 없다. source·accepted claim·page spec에서 페이지를 생성하고 receipt를 남기며, 존재하지 않는 source나 승인되지 않은 claim을 참조하면 컴파일이 실패한다. 정렬·타임스탬프·경로 정규화를 모두 고정해 같은 입력이면 같은 바이트가 나온다 — cold rebuild를 두 번 돌려도 vault working tree가 그대로임을 확인했다. 대가는 페이지 한 장을 고치는 데 세 카탈로그를 함께 고쳐야 한다는 점이고, 이 구조가 환각을 막아 주지는 않는다(`tests/test_compiled_wiki.py` 172건).
-
-**5. 검색 품질을 고정 질의와 기대 문서로 비교한다.**
-제목이 아니라 실제로 다시 찾을 때 쓰는 문장을 질의로 두고, 각 질의가 기대 문서를 top-5 안에 넣는지 측정합니다. 현재 40개 중 39개가 top-5에 들어오고 1개는 lexical 색인이 찾지 못합니다. 이 결과는 현재 Vault와 질의 세트에만 해당하며 의미 기반 검색 품질을 보장하지 않습니다(`bench/knowledge-queries.yaml`).
+- **지침 생성** — 규칙은 `standards/`·`policies/`에만 두고, Codex·Claude·Copilot 파일은 `woon context generate`로 만듭니다. `woon context check --all`은 입력과 산출물이 다르면 실패합니다. → [`src/woon_core/context/`](src/woon_core/context/)
+- **저장소 참조** — `repo://` URI를 workspace root와 registry의 저장소 ID로 해석합니다. root가 둘 이상이면 추측하지 않고 실패합니다. → [`workspace.py`](src/woon_core/workspace.py)
+- **지식 갱신** — document·search·history MCP port를 거치며, 쓰기는 읽은 revision과 현재 revision이 같을 때만 통과합니다. → [`knowledge/`](src/woon_core/knowledge/)
+- **위키 컴파일** — source·accepted claim·page spec에서 페이지와 receipt를 생성합니다. 없는 source나 승인되지 않은 claim을 참조하면 실패하고, 같은 입력은 같은 바이트를 만듭니다. → [`test_compiled_wiki.py`](tests/test_compiled_wiki.py)
+- **검색 평가** — 실제로 다시 찾을 때 쓰는 고정 질의 40개와 기대 문서를 비교합니다. 현재 39개가 top-5에 들어오며, 결과는 SQLite FTS 기반 lexical 검색에 한정됩니다. → [`knowledge-queries.yaml`](bench/knowledge-queries.yaml)
 
 ## 검증
 
