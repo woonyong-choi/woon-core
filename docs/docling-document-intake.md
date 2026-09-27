@@ -82,7 +82,7 @@ uv run woon knowledge document-audit --vault /path/to/woon-knowledge
 
 `document-audit`은 미종결 후보, 사용자 판단 적체, receipt/source drift가 하나라도 있으면 실패한다. 이 실패는 유지보수 실행의 완료를 막는다.
 
-종결한 변환 임시물을 정리할 때는 [Core Inbox 인터페이스](../README.md#명시적-inbox-처리)의 `document-status`와 `document-cleanup`을 사용한다. v1 영수증은 기존 추출물과 함께 검증하고, cleanup은 정확한 영수증 SHA와 owned 파일 목록을 고정한 v2 영수증을 먼저 기록한다. 중간 삭제가 실패하면 남은 파일만 검증·정리하며 사용자 추가·변경 파일과 symlink는 보존하고 실패한다. 완료 뒤 같은 변환 ID는 추출물을 재생성하지 않고 compact terminal 결과를 반환한다. converter·옵션 버전이 달라져 새 conversion ID가 생긴 경우는 별도 변환이며 semantic Inbox identity와 혼동하지 않는다. 원본 bytes·Wiki·source archive는 이 cleanup 대상이 아니다. 영수증 hash는 삭제한 bytes의 백업이 아니다.
+종결한 변환 임시물을 정리할 때는 [Core Inbox 인터페이스](cli-reference.md#명시적-inbox-처리)의 `document-status`와 `document-cleanup`을 사용한다. v1 영수증은 기존 추출물과 함께 검증하고, cleanup은 정확한 영수증 SHA와 owned 파일 목록을 고정한 v2 영수증을 먼저 기록한다. 중간 삭제가 실패하면 남은 파일만 검증·정리하며 사용자 추가·변경 파일과 symlink는 보존하고 실패한다. 완료 뒤 같은 변환 ID는 추출물을 재생성하지 않고 compact terminal 결과를 반환한다. converter·옵션 버전이 달라져 새 conversion ID가 생긴 경우는 별도 변환이며 semantic Inbox identity와 혼동하지 않는다. 원본 bytes·Wiki·source archive는 이 cleanup 대상이 아니다. 영수증 hash는 삭제한 bytes의 백업이 아니다.
 
 ## 제한
 
