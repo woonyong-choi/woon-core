@@ -5,7 +5,7 @@ repositories:
     directory: woon-core
     role: control-plane
   skills:
-    remote: https://github.com/woonyong-choi/woon-skills.git
+    remote: https://github.com/woonyong-choi/woon-skills-backup.git
     directory: woon-skills
     role: skill-catalog
   env:
